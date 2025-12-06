@@ -194,7 +194,10 @@ def main():
         "--pad-id",
         type=int,
         default=0,
-        help="ID de padding a ignorar en la loss.",
+        help=(
+            "ID de padding a ignorar en la loss. "
+            "Si es 0, se auto-detecta desde el tokenizer (<PAD> o <pad>)."
+        ),
     )
     parser.add_argument(
         "--freeze-backbone",
@@ -218,6 +221,12 @@ def main():
     tok_state = torch.load(tok_path, map_location="cpu")
     stoi = tok_state["stoi"]
     tokenizer = CharTokenizerFromState(stoi)
+
+    # Detectar automáticamente el pad_id desde el vocabulario
+    auto_pad_id = stoi.get("<PAD>", stoi.get("<pad>", args.pad_id))
+    effective_pad_id = auto_pad_id if args.pad_id == 0 else args.pad_id
+    print(f"[INFO] pad_id detectado: {auto_pad_id}")
+    print(f"[INFO] Usando pad_id efectivo en training: {effective_pad_id}")
 
     # ------------------------------------------------------------
     # 2. Cargar checkpoint base (gpt_char_best.pt) y reconstruir config
@@ -394,10 +403,17 @@ def main():
         print(f"\n===== Época {epoch}/{args.max_epochs} =====")
 
         train_loss = train_one_epoch(
-            model, train_loader, optimizer, device, pad_token_id=args.pad_id
+            model,
+            train_loader,
+            optimizer,
+            device,
+            pad_token_id=effective_pad_id,
         )
         val_loss = evaluate(
-            model, val_loader, device, pad_token_id=args.pad_id
+            model,
+            val_loader,
+            device,
+            pad_token_id=effective_pad_id,
         )
 
         print(

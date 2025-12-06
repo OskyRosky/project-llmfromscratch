@@ -35,15 +35,18 @@ st.set_page_config(
 def get_model_bundle(device_str: str = "mps") -> InstructionsModelBundle:
     """
     Carga el modelo de instrucciones y lo cachea.
-    OJO: aquí pasamos device_str como string, no un torch.device,
-    y pasamos el DIRECTORIO donde está el checkpoint.
+
+    OJO:
+      - Aquí usamos la MISMA interfaz que en eval_instructions_mini:
+        load_instructions_model(ckpt_dir, device_str=...)
     """
-    # 👈 IMPORTANTE: aquí va el directorio, no el archivo .pt
     ckpt_dir = "models/checkpoints_oscar_long"
 
     st.write(f"[DEBUG] Cargando modelo en dispositivo: {device_str}")
-    # load_instructions_model espera (ckpt_dir: str, device_str: str)
-    bundle = load_instructions_model(ckpt_dir, device_str=device_str)
+    bundle = load_instructions_model(
+        ckpt_dir=ckpt_dir,
+        device_str=device_str,
+    )
     return bundle
 
 
@@ -64,7 +67,7 @@ temperature = st.sidebar.slider(
     "temperature",
     min_value=0.0,
     max_value=1.5,
-    value=0.7,
+    value=0.0,  # igual que en eval_instructions_mini para que sea determinista
     step=0.05,
 )
 
@@ -82,7 +85,7 @@ st.title("💬 LLM From Scratch – Instruction Chat (tiny)")
 
 st.markdown(
     """
-Modelo **caracter a caracter** entrenado desde cero sobre `oscar_corpus.txt`  
+Modelo **carácter a carácter** entrenado desde cero sobre `oscar_corpus.txt`  
 y luego *instruction-tuned* con un conjunto mínimo de pares (instrucción → respuesta).
 
 ⚠️ **Este modelo es muy pequeño y educativo**, no esperes respuestas tipo ChatGPT.
@@ -91,9 +94,23 @@ y luego *instruction-tuned* con un conjunto mínimo de pares (instrucción → r
 
 st.markdown("---")
 
+st.markdown("### Pregunta de prueba")
+
+opciones = [
+    "Los perros son caninos?",
+    "Los gatos son felinos?",
+    "Cuál es la capital de Costa Rica?",
+]
+
+pregunta_base = st.radio(
+    "Elige una de las preguntas de test:",
+    opciones,
+    index=0,
+)
+
 prompt = st.text_area(
-    "Escribe una instrucción o pregunta:",
-    value="Un perro es un canino?",
+    "Puedes ajustar la pregunta si quieres:",
+    value=pregunta_base,
     height=100,
 )
 
@@ -102,18 +119,22 @@ if st.button("Generar respuesta"):
         st.warning("Por favor escribe una instrucción o pregunta.")
     else:
         with st.spinner("Cargando modelo (si es la primera vez) y generando respuesta..."):
-            # Aquí NO pasamos torch.device, solo el string "mps"
+            # Cargamos el bundle SOLO aquí (y cacheado)
             bundle = get_model_bundle(device_str="mps")
 
-            answer = generate_answer(
+            # IMPORTANTE: generate_answer ya la tienes retornando (answer_text, full_text)
+            answer_text, full_text = generate_answer(
                 bundle=bundle,
-                user_prompt=prompt,
+                prompt=prompt,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
             )
 
-        st.markdown("### Respuesta del modelo")
-        st.write(answer)
+        st.markdown("### 🟢 Respuesta procesada (solo después de `<resp>`)")
+        st.write(answer_text)
+
+        st.markdown("### 📜 Texto completo generado")
+        st.code(repr(full_text), language="python")
 
         st.markdown("---")
         st.markdown(
@@ -121,4 +142,4 @@ if st.button("Generar respuesta"):
             "las respuestas pueden ser incoherentes._"
         )
 else:
-    st.info("Escribe una pregunta y pulsa **Generar respuesta**.")
+    st.info("Elige una pregunta y pulsa **Generar respuesta**.")
