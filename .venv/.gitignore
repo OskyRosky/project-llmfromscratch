@@ -1,0 +1,13 @@
+# Entorno virtual
+.venv/
+
+# Versiones dentro de subcarpetas
+V1/.venv/
+V2/.venv/
+Base/.venv/
+
+# Raw data
+*/data/raw/
+
+# Model checkpoints
+*/models/checkpoints/

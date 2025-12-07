@@ -1,0 +1,15 @@
+# Entorno local
+.venv/
+__pycache__/
+*.pyc
+
+# Git
+.git
+.gitignore
+
+# Datos crudos grandes (no los necesitas para inference)
+data/raw/
+
+# Archivos temporales
+*.log
+.DS_Store
