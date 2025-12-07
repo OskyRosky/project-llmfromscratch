@@ -1,0 +1,6 @@
+# Entorno virtual
+.venv/
+
+# Datos grandes (no subir a GitHub)
+Base/data/raw/oscar-small-train.parquet
+Base/data/raw/oscar_corpus.txt
