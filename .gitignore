@@ -19,3 +19,10 @@ V2/data/processed/
 *.bin
 *.pt
 *.ckpt
+
+# data (raw/interim/processed)
+V2/data/
+data/
+*.txt
+*.parquet
+*.csv
