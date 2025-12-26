@@ -5,3 +5,14 @@ data/raw/oscar_corpus.txt
 # patrón general por si creas más
 data/raw/*.parquet
 data/raw/*corpus*.txt
+
+V2/data/raw/
+V2/data/interim/
+V2/data/processed/
+*.txt
+*.jsonl
+*.parquet
+*.arrow
+*.bin
+*.pt
+*.ckpt
