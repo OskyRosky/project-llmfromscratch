@@ -6,9 +6,12 @@ data/raw/oscar_corpus.txt
 data/raw/*.parquet
 data/raw/*corpus*.txt
 
+# LLM data (never commit)
 V2/data/raw/
 V2/data/interim/
 V2/data/processed/
+
+
 *.txt
 *.jsonl
 *.parquet
