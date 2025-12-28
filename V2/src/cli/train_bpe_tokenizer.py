@@ -1,4 +1,4 @@
-# V2/src/cli/train_bpe_tokenizer.py
+# src/cli/train_bpe_tokenizer.py
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.trainers import BpeTrainer
 from tokenizers.normalizers import NFKC
+from tokenizers.processors import TemplateProcessing
 
 
-# OJO: estos deben coincidir EXACTAMENTE con el wrapper BPETokenizer
-SPECIAL_TOKENS = ["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<instr>", "<resp>"]
+SPECIAL_TOKENS = ["<pad>", "<unk>", "<bos>", "<eos>", "<instr>", "<resp>"]
 
 
 def train_bpe_tokenizer(
@@ -32,12 +32,9 @@ def train_bpe_tokenizer(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # Importante: unk_token debe ser el mismo que está en SPECIAL_TOKENS
-    tokenizer = Tokenizer(BPE(unk_token="<UNK>"))
+    tokenizer = Tokenizer(BPE(unk_token="<unk>"))
     tokenizer.normalizer = NFKC()
-
-    # Recomendado estilo GPT2: add_prefix_space=True (te da tokens tipo 'Ġ...')
-    tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
+    tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
 
     trainer = BpeTrainer(
         vocab_size=vocab_size,
@@ -47,8 +44,17 @@ def train_bpe_tokenizer(
     )
 
     tokenizer.train(files=[corpus_path], trainer=trainer)
-
     tokenizer.decoder = ByteLevelDecoder()
+
+    # Define BOS/EOS usable en generación si luego decides agregarlos explícitamente
+    tokenizer.post_processor = TemplateProcessing(
+        single="$A",
+        pair="$A $B",
+        special_tokens=[
+            ("<bos>", tokenizer.token_to_id("<bos>")),
+            ("<eos>", tokenizer.token_to_id("<eos>")),
+        ],
+    )
 
     tokenizer_path = os.path.join(out_dir, "tokenizer.json")
     tokenizer.save(tokenizer_path)
@@ -58,11 +64,16 @@ def train_bpe_tokenizer(
 
 def quick_sanity_check(tokenizer_path: str) -> None:
     tok = Tokenizer.from_file(tokenizer_path)
+    vocab = tok.get_vocab()
 
-    # Verificar special tokens
-    missing = [t for t in SPECIAL_TOKENS if tok.token_to_id(t) is None]
+    specials = ["<pad>", "<unk>", "<bos>", "<eos>", "<instr>", "<resp>"]
+    missing = [t for t in specials if t not in vocab]
     if missing:
-        raise RuntimeError(f"Tokenizer missing special tokens: {missing}")
+        raise RuntimeError(f"Tokenizer missing special tokens in vocab: {missing}")
+
+    print("\n[CHECK] Special tokens in vocab ✅")
+    print({t: vocab.get(t) for t in specials})
+    print("vocab_size:", tok.get_vocab_size())
 
     tests = [
         "Los perros son caninos?",
@@ -70,7 +81,6 @@ def quick_sanity_check(tokenizer_path: str) -> None:
         "La capital de Costa Rica es San José.",
     ]
 
-    print("\n[CHECK] Special tokens OK ✅")
     for t in tests:
         enc = tok.encode(t)
         dec = tok.decode(enc.ids)
@@ -81,33 +91,11 @@ def quick_sanity_check(tokenizer_path: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Train a BPE tokenizer (subword) over a text corpus."
-    )
-    parser.add_argument(
-        "--corpus",
-        type=str,
-        required=True,
-        help="Path to corpus txt (e.g., V2/data/raw/oscar_corpus.txt)",
-    )
-    parser.add_argument(
-        "--out_dir",
-        type=str,
-        default="V2/models/tokenizers/oscar_bpe_v3",
-        help="Output directory",
-    )
-    parser.add_argument(
-        "--vocab_size",
-        type=int,
-        default=4096,
-        help="Vocabulary size (e.g., 4096, 8192, 16384)",
-    )
-    parser.add_argument(
-        "--min_frequency",
-        type=int,
-        default=2,
-        help="Min token frequency",
-    )
+    parser = argparse.ArgumentParser(description="Train a BPE tokenizer (subword) over a text corpus.")
+    parser.add_argument("--corpus", type=str, required=True, help="Path to corpus txt (e.g., data/raw/oscar_corpus.txt)")
+    parser.add_argument("--out_dir", type=str, default="models/tokenizers/oscar_bpe_v4", help="Output directory")
+    parser.add_argument("--vocab_size", type=int, default=4096, help="Vocabulary size (e.g., 4096, 8192, 16384)")
+    parser.add_argument("--min_frequency", type=int, default=2, help="Min token frequency")
     args = parser.parse_args()
 
     tokenizer_path = train_bpe_tokenizer(
