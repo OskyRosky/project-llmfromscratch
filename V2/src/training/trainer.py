@@ -77,7 +77,7 @@ class Trainer:
         if isinstance(out, torch.Tensor):
             if out.ndim != 3:
                 raise ValueError(
-                    f"Salida del modelo es Tensor pero no es 3D (B,T,V). "
+                    "Salida del modelo es Tensor pero no es 3D (B,T,V). "
                     f"shape={tuple(out.shape)}"
                 )
             return out
@@ -138,6 +138,7 @@ class Trainer:
 
         self.optimizer.step()
 
+        # detach() evita warnings y asegura que devolvemos un número limpio
         return float(loss.detach().item())
 
     # ---------------------------------------------------------
@@ -200,14 +201,15 @@ class Trainer:
 
             loss = self._step(input_ids, target_ids)
 
-            total_loss += float(loss.detach().item())
+            loss_val = float(loss.detach().item())
+            total_loss += loss_val
             num_batches += 1
 
             if logger is not None and log_every and batch_idx % log_every == 0:
                 progress = 100.0 * batch_idx / total_batches
                 logger.info(
                     f"[val {batch_idx}/{total_batches} "
-                    f"({progress:.2f}%)] loss={float(loss.detach().item()):.4f}"
+                    f"({progress:.2f}%)] loss={loss_val:.4f}"
                 )
 
         mean_loss = total_loss / max(1, num_batches)
