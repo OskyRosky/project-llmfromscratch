@@ -1,7 +1,9 @@
 # src/data/datasets.py
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple, Dict, Any
+from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
 from torch.utils.data import Dataset
@@ -39,8 +41,6 @@ class CharacterDataset(Dataset):
 
     def __len__(self) -> int:
         """
-        Número de ejemplos de entrenamiento disponibles.
-
         Para una secuencia de longitud N y ventana L, hay N - L ejemplos.
         """
         return len(self.token_ids) - self.seq_len
@@ -65,6 +65,66 @@ class CharacterDataset(Dataset):
 
 
 # --------------------------------------------------------------------
+# 1B. TokenBinDataset – pretraining token-level (BPE ids desde tokens.bin)
+# --------------------------------------------------------------------
+
+
+class TokenBinDataset(Dataset):
+    """
+    Dataset token-level para pretraining (next-token prediction) leyendo
+    un archivo binario tokens.bin (uint16/uint32) vía memmap.
+
+    Construye ejemplos:
+        x = tokens[i : i+seq_len]
+        y = tokens[i+1 : i+1+seq_len]
+    """
+
+    def __init__(self, tokens_bin_path: str, seq_len: int, dtype: str = "uint16") -> None:
+        if seq_len < 1:
+            raise ValueError("seq_len must be >= 1")
+
+        self.tokens_bin_path = str(tokens_bin_path)
+        self.seq_len = int(seq_len)
+
+        if dtype not in ("uint16", "uint32"):
+            raise ValueError("dtype must be 'uint16' or 'uint32'")
+        self.dtype = dtype
+
+        # Import local para no forzar numpy si no se usa este dataset
+        import numpy as np
+
+        np_dtype = np.uint16 if dtype == "uint16" else np.uint32
+
+        # memmap (no carga todo en RAM)
+        self._mm = np.memmap(self.tokens_bin_path, mode="r", dtype=np_dtype)
+
+        if self._mm.size <= self.seq_len:
+            raise ValueError(
+                f"Not enough tokens ({self._mm.size}) for seq_len={self.seq_len}. "
+                "Need a longer corpus or a smaller seq_len."
+            )
+
+        self.n_tokens = int(self._mm.size)
+
+    def __len__(self) -> int:
+        return self.n_tokens - self.seq_len
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index {idx} out of range 0..{len(self) - 1}")
+
+        # Import local para no forzar numpy si no se usa este dataset
+        import numpy as np
+
+        x_np = self._mm[idx : idx + self.seq_len].astype(np.int64, copy=False)
+        y_np = self._mm[idx + 1 : idx + 1 + self.seq_len].astype(np.int64, copy=False)
+
+        x = torch.from_numpy(x_np).long()
+        y = torch.from_numpy(y_np).long()
+        return x, y
+
+
+# --------------------------------------------------------------------
 # 2. ClassificationDataset – finetuning de clasificación
 # --------------------------------------------------------------------
 
@@ -82,25 +142,19 @@ class ClassificationExample:
 
 class ClassificationDataset(Dataset):
     """
-    Dataset para clasificación de texto usando un tokenizer de caracteres.
+    Dataset para clasificación de texto usando un tokenizer.
 
     Requisitos del tokenizer:
       - método encode(text: str) -> List[int]
-      - diccionario .stoi con los IDs de los tokens
-        (idealmente con "<PAD>" o "<pad>" para padding).
+      - opcionalmente un vocabulario .stoi para localizar pad_id.
     """
 
     def __init__(self, examples, tokenizer, seq_len: int):
-        """
-        :param examples: lista de ClassificationExample
-        :param tokenizer: tokenizer de caracteres ya cargado
-        :param seq_len: longitud fija de secuencia
-        """
         self.examples: List[ClassificationExample] = list(examples)
         self.tokenizer = tokenizer
         self.seq_len = seq_len
 
-        # Intentar encontrar un pad_id razonable.
+        # Intentar encontrar un pad_id razonable:
         # Primero "<PAD>", luego "<pad>", y si no existe, 0.
         stoi: Dict[str, int] = getattr(self.tokenizer, "stoi", {})
         self.pad_id: int = stoi.get("<PAD>", stoi.get("<pad>", 0))
@@ -109,19 +163,12 @@ class ClassificationDataset(Dataset):
         return len(self.examples)
 
     def _encode_text(self, text: str) -> torch.Tensor:
-        """
-        Codifica un texto a IDs, truncando o rellenando con PAD
-        hasta seq_len.
-        """
         ids = self.tokenizer.encode(text)
 
-        # Truncar si excede seq_len
         if len(ids) > self.seq_len:
             ids = ids[: self.seq_len]
-        # Rellenar con pad_id si es más corto
         elif len(ids) < self.seq_len:
-            pad_length = self.seq_len - len(ids)
-            ids = ids + [self.pad_id] * pad_length
+            ids = ids + [self.pad_id] * (self.seq_len - len(ids))
 
         return torch.tensor(ids, dtype=torch.long)
 
@@ -132,7 +179,7 @@ class ClassificationDataset(Dataset):
 
         return {
             "input_ids": input_ids,  # (seq_len,)
-            "label": label,          # entero con la clase
+            "label": label,
         }
 
 
@@ -156,11 +203,14 @@ class InstructionDataset(Dataset):
     """
     Dataset para instruction tuning.
 
-    Construye secuencias de texto de la forma:
-
+    Construye texto:
         "<instr> {prompt}\n<resp> {response}"
 
-    Luego las tokeniza y aplica truncado/padding a seq_len.
+    Luego tokeniza y aplica truncado/padding a seq_len.
+
+    Retorna:
+      - input_ids
+      - labels (clon de input_ids; el shift se hace en entrenamiento/loss)
     """
 
     def __init__(
@@ -171,22 +221,6 @@ class InstructionDataset(Dataset):
         instr_prefix: str = "<instr>",
         resp_prefix: str = "<resp>",
     ):
-        """
-        Parameters
-        ----------
-        examples:
-            Lista de InstructionExample.
-        tokenizer:
-            Objeto con:
-              - encode(text: str) -> List[int]
-              - atributo .stoi (dict) con vocabulario.
-        seq_len:
-            Longitud máxima de secuencia.
-        instr_prefix:
-            Prefijo para la parte de instrucción.
-        resp_prefix:
-            Prefijo para la parte de respuesta.
-        """
         self.examples: List[InstructionExample] = list(examples)
         self.tokenizer = tokenizer
         self.seq_len = seq_len
@@ -195,8 +229,7 @@ class InstructionDataset(Dataset):
 
         # Detectar pad_id coherente con el vocabulario del tokenizer
         stoi: Dict[str, int] = getattr(self.tokenizer, "stoi", {})
-        pad_id = stoi.get("<PAD>", stoi.get("<pad>", 0))
-        self.pad_id: int = pad_id
+        self.pad_id: int = stoi.get("<PAD>", stoi.get("<pad>", 0))
 
     def __len__(self) -> int:
         return len(self.examples)
@@ -204,24 +237,19 @@ class InstructionDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         ex = self.examples[idx]
 
-        # Texto conjunto instrucción + respuesta
         full_text = f"{self.instr_prefix} {ex.prompt}\n{self.resp_prefix} {ex.response}"
-
-        # Tokenización -> lista de IDs
         ids = self.tokenizer.encode(full_text)
 
-        # Truncado a seq_len
+        # truncado
         ids = ids[: self.seq_len]
 
-        # Padding con pad_id a la derecha
+        # padding
         if len(ids) < self.seq_len:
             ids = ids + [self.pad_id] * (self.seq_len - len(ids))
 
         input_ids = torch.tensor(ids, dtype=torch.long)
 
-        # Para LM: labels = input_ids (el shift se hace en la loss/entrenamiento)
-        sample = {
-            "input_ids": input_ids,          # (T,)
-            "labels": input_ids.clone(),     # (T,)
+        return {
+            "input_ids": input_ids,      # (T,)
+            "labels": input_ids.clone(), # (T,)
         }
-        return sample
