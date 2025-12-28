@@ -14,7 +14,8 @@ from tokenizers.trainers import BpeTrainer
 from tokenizers.normalizers import NFKC
 
 
-SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>", "<instr>", "<resp>"]
+# OJO: estos deben coincidir EXACTAMENTE con el wrapper BPETokenizer
+SPECIAL_TOKENS = ["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<instr>", "<resp>"]
 
 
 def train_bpe_tokenizer(
@@ -31,9 +32,12 @@ def train_bpe_tokenizer(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    tokenizer = Tokenizer(BPE(unk_token="<unk>"))
+    # Importante: unk_token debe ser el mismo que está en SPECIAL_TOKENS
+    tokenizer = Tokenizer(BPE(unk_token="<UNK>"))
     tokenizer.normalizer = NFKC()
-    tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
+
+    # Recomendado estilo GPT2: add_prefix_space=True (te da tokens tipo 'Ġ...')
+    tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
 
     trainer = BpeTrainer(
         vocab_size=vocab_size,
@@ -77,11 +81,33 @@ def quick_sanity_check(tokenizer_path: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a BPE tokenizer (subword) over a text corpus.")
-    parser.add_argument("--corpus", type=str, required=True, help="Path to corpus txt (e.g., data/raw/oscar_corpus.txt)")
-    parser.add_argument("--out_dir", type=str, default="models/tokenizers/oscar_bpe_v2", help="Output directory")
-    parser.add_argument("--vocab_size", type=int, default=4096, help="Vocabulary size (e.g., 4096, 8192, 16384)")
-    parser.add_argument("--min_frequency", type=int, default=2, help="Min token frequency")
+    parser = argparse.ArgumentParser(
+        description="Train a BPE tokenizer (subword) over a text corpus."
+    )
+    parser.add_argument(
+        "--corpus",
+        type=str,
+        required=True,
+        help="Path to corpus txt (e.g., V2/data/raw/oscar_corpus.txt)",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="V2/models/tokenizers/oscar_bpe_v3",
+        help="Output directory",
+    )
+    parser.add_argument(
+        "--vocab_size",
+        type=int,
+        default=4096,
+        help="Vocabulary size (e.g., 4096, 8192, 16384)",
+    )
+    parser.add_argument(
+        "--min_frequency",
+        type=int,
+        default=2,
+        help="Min token frequency",
+    )
     args = parser.parse_args()
 
     tokenizer_path = train_bpe_tokenizer(
