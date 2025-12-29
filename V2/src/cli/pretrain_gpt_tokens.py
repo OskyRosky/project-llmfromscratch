@@ -291,10 +291,13 @@ def main() -> None:
     )
 
     trainer = Trainer(
-        model=model,
-        optimizer=optimizer,
-        train_cfg=train_cfg,
-        ckpt_dir=str(ckpt_dir),
+    model=model,
+    optimizer=optimizer,
+    train_cfg=train_cfg,
+    ckpt_dir=str(ckpt_dir),
+    debug_first_batch=True,
+    expected_vocab_size=vocab_size,
+    expected_seq_len=args.seq_len,
     )
 
     # 6) Train loop
