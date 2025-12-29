@@ -1,3 +1,5 @@
+# src/model/layers.py
+
 from typing import Optional
 
 import torch
@@ -11,18 +13,29 @@ class TokenEmbedding(nn.Module):
 
     Input:  (batch_size, seq_len)  of token ids
     Output: (batch_size, seq_len, embed_dim)
-
-    IMPORTANT:
-    We do NOT scale embeddings by sqrt(d_model). With pre-norm residual blocks
-    and weight tying (lm_head.weight = embedding.weight), this scaling can
-    blow up logits at initialization and make CE enormous.
     """
 
-    def __init__(self, vocab_size: int, embed_dim: int) -> None:
+    def __init__(self, vocab_size: int, embed_dim: int, init_std: float = 0.02) -> None:
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.embed_dim = embed_dim
+
+        # IMPORTANT: GPT-style init (small std) to avoid huge logits at start
+        nn.init.normal_(self.embedding.weight, mean=0.0, std=init_std)
 
     def forward(self, input_ids: Tensor) -> Tensor:
+        """
+        Parameters
+        ----------
+        input_ids:
+            Tensor of shape (batch_size, seq_len) with token ids.
+
+        Returns
+        -------
+        embeddings:
+            Tensor of shape (batch_size, seq_len, embed_dim).
+        """
+        # No scaling here. We rely on correct initialization instead.
         return self.embedding(input_ids)
 
 
@@ -36,12 +49,27 @@ class PositionalEmbedding(nn.Module):
     Output: (batch_size, seq_len, embed_dim)  positional vectors
     """
 
-    def __init__(self, max_seq_len: int, embed_dim: int) -> None:
+    def __init__(self, max_seq_len: int, embed_dim: int, init_std: float = 0.02) -> None:
         super().__init__()
         self.pos_embedding = nn.Embedding(max_seq_len, embed_dim)
         self.max_seq_len = max_seq_len
 
+        # Same small init
+        nn.init.normal_(self.pos_embedding.weight, mean=0.0, std=init_std)
+
     def forward(self, input_ids: Tensor) -> Tensor:
+        """
+        Parameters
+        ----------
+        input_ids:
+            Tensor of shape (batch_size, seq_len). We ignore the actual
+            token values and only use seq_len to build positions.
+
+        Returns
+        -------
+        pos_emb:
+            Tensor of shape (batch_size, seq_len, embed_dim).
+        """
         batch_size, seq_len = input_ids.shape
 
         if seq_len > self.max_seq_len:
