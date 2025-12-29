@@ -24,6 +24,9 @@ class GPTConfig:
     - n_layers: número de bloques Transformer
     - dropout: prob. de dropout
     - layer_norm_eps: epsilon numérico para LayerNorm
+    - init_std: std de inicialización (embeddings y positional embeddings).
+        Nota: si haces weight tying (lm_head.weight = tok_embedding.weight),
+        este init_std controla directamente la escala inicial de los logits.
     """
     vocab_size: int
     max_seq_len: int
@@ -33,6 +36,7 @@ class GPTConfig:
     n_layers: int = 4
     dropout: float = 0.1
     layer_norm_eps: float = 1e-5
+    init_std: float = 0.02
 
 
 class GPTModel(nn.Module):
@@ -54,10 +58,12 @@ class GPTModel(nn.Module):
         self.tok_embedding = TokenEmbedding(
             vocab_size=config.vocab_size,
             embed_dim=config.d_model,
+            init_std=config.init_std,
         )
         self.pos_embedding = PositionalEmbedding(
             max_seq_len=config.max_seq_len,
             embed_dim=config.d_model,
+            init_std=config.init_std,
         )
 
         # Dropout aplicado tras sumar token + posición
@@ -82,7 +88,9 @@ class GPTModel(nn.Module):
         # Proyección a vocabulario
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-        # Weight tying: compartir pesos entre embedding de entrada y proyección de salida
+        # Weight tying:
+        # Compartimos pesos entre embedding de entrada y proyección de salida.
+        # => La escala inicial de los logits depende fuertemente del init de embeddings.
         self.lm_head.weight = self.tok_embedding.embedding.weight
 
     def forward(
@@ -149,15 +157,12 @@ class GPTModel(nn.Module):
         # Logits a vocabulario
         logits = self.lm_head(hidden)  # (B, T, vocab_size)
 
-        # Priorizamos el uso en clasificación: hidden states
         if return_hidden:
             return logits, hidden
 
-        # Compatibilidad con uso anterior de atención
         if return_attn:
             return logits, all_attn
 
-        # Caso simple: solo logits
         return logits
 
     @torch.no_grad()
@@ -170,48 +175,25 @@ class GPTModel(nn.Module):
     ) -> Tensor:
         """
         Generación autoregresiva simple (greedy / sampling).
-
-        Parameters
-        ----------
-        input_ids:
-            Tensor de enteros (batch_size, seq_len).
-        max_new_tokens:
-            Cuántos tokens nuevos queremos generar.
-        temperature:
-            Escala los logits antes del softmax (temperature > 1 => más plano).
-            Si temperature == 0, se ignora y se hace greedy puro.
-        top_k:
-            Si no es None, mantiene solo los top_k logits más altos
-            antes del softmax (sampling más enfocado).
-
-        Returns
-        -------
-        Tensor (batch_size, seq_len + max_new_tokens)
-            Secuencias originales + tokens generados.
         """
-        self.eval()  # modo evaluación
+        self.eval()
 
         out_ids = input_ids.clone()
 
         for _ in range(max_new_tokens):
-            # Recortar contexto a max_seq_len si hace falta
             if out_ids.size(1) > self.config.max_seq_len:
                 context = out_ids[:, -self.config.max_seq_len :]
             else:
                 context = out_ids
 
-            # Forward: obtenemos logits para todos los pasos,
-            # nos interesa solo el último token
-            logits = self(context)          # ahora forward devuelve solo logits
-            logits = logits[:, -1, :]       # (batch_size, vocab_size)
+            logits = self(context)
+            logits = logits[:, -1, :]
 
             if temperature > 0.0:
                 logits = logits / temperature
 
-            # Opcional: top-k truncation
             if top_k is not None:
                 top_k_vals, _ = torch.topk(logits, k=top_k, dim=-1)
-                # umbral = menor logit dentro de top_k para cada fila
                 min_top_k = top_k_vals[:, -1].unsqueeze(-1)
                 logits = torch.where(
                     logits < min_top_k,
@@ -219,18 +201,13 @@ class GPTModel(nn.Module):
                     logits,
                 )
 
-            # Convertir a probabilidades
             probs = torch.softmax(logits, dim=-1)
 
-            # Estrategia de muestreo:
-            #   - si temperature == 0 -> greedy (argmax)
-            #   - si temperature > 0 -> sampling multinomial
             if temperature == 0.0:
                 next_token = torch.argmax(probs, dim=-1, keepdim=True)
             else:
                 next_token = torch.multinomial(probs, num_samples=1)
 
-            # Concatenar nuevo token
             out_ids = torch.cat([out_ids, next_token], dim=1)
 
         return out_ids

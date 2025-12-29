@@ -13,6 +13,13 @@ class TokenEmbedding(nn.Module):
 
     Input:  (batch_size, seq_len)  of token ids
     Output: (batch_size, seq_len, embed_dim)
+
+    Nota importante:
+    - Este proyecto usa weight tying (lm_head.weight = tok_embedding.weight).
+      Eso significa que el embedding NO solo afecta la entrada del modelo,
+      también determina directamente la escala inicial de los logits.
+    - Por eso inicializamos con un std pequeño (init_std) y evitamos escalados
+      tipo sqrt(d_model) aquí: previene logits gigantes y CE absurda al inicio.
     """
 
     def __init__(self, vocab_size: int, embed_dim: int, init_std: float = 0.02) -> None:
@@ -20,7 +27,8 @@ class TokenEmbedding(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.embed_dim = embed_dim
 
-        # IMPORTANT: GPT-style init (small std) to avoid huge logits at start
+        # GPT-style init: small std to keep initial logits in a sane range,
+        # especially important when weight tying is used.
         nn.init.normal_(self.embedding.weight, mean=0.0, std=init_std)
 
     def forward(self, input_ids: Tensor) -> Tensor:
@@ -54,7 +62,7 @@ class PositionalEmbedding(nn.Module):
         self.pos_embedding = nn.Embedding(max_seq_len, embed_dim)
         self.max_seq_len = max_seq_len
 
-        # Same small init
+        # Same small init as token embeddings to keep magnitudes stable.
         nn.init.normal_(self.pos_embedding.weight, mean=0.0, std=init_std)
 
     def forward(self, input_ids: Tensor) -> Tensor:
