@@ -206,6 +206,20 @@ def main() -> None:
         help="Only report perplexity when loss <= this threshold",
     )
 
+    # NEW: logging frequency by percentage (and optional override)
+    parser.add_argument(
+        "--log_pct",
+        type=float,
+        default=1.0,
+        help="Log every X%% of max_steps (default 1.0)",
+    )
+    parser.add_argument(
+        "--log_every",
+        type=int,
+        default=0,
+        help="If >0, overrides log frequency to log every N steps",
+    )
+
     args = parser.parse_args()
     logger = get_logger("pretrain_gpt_tokens")
 
@@ -216,6 +230,10 @@ def main() -> None:
         raise ValueError("--train_avg_window debe ser >= 1")
     if args.max_val_batches <= 0:
         raise ValueError("--max_val_batches debe ser >= 1")
+    if args.log_pct <= 0.0:
+        raise ValueError("--log_pct debe ser > 0.0")
+    if args.log_every < 0:
+        raise ValueError("--log_every debe ser >= 0")
 
     # 1) Meta + paths
     meta = load_meta(args.meta)
@@ -283,9 +301,14 @@ def main() -> None:
     global_step = 0
     max_steps = int(args.max_steps)
     max_epochs = int(args.max_epochs)
-   # logging frequency (prefer % of run)
-    default_log_every = max(1, int(round(max_steps * 0.01)))  # 1% por defecto
-    log_every = getattr(train_cfg, "log_every", default_log_every)
+
+    # NEW: log by percentage (default 1%), with optional override
+    if args.log_every and args.log_every > 0:
+        log_every = int(args.log_every)
+    else:
+        log_every = max(1, int(round(max_steps * (args.log_pct / 100.0))))
+
+    logger.info(f"Logging every {log_every} steps (log_pct={args.log_pct:g}%)")
 
     logger.info(
         f"Starting token pretraining: vocab_size={vocab_size}, seq_len={args.seq_len}, "
