@@ -1,6 +1,6 @@
 # src/training/losses.py
 
-from typing import Optional
+from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
@@ -8,51 +8,36 @@ from torch import Tensor
 
 
 def language_modeling_loss(
-    logits: Tensor,          # (batch_size, seq_len, vocab_size)
-    target_ids: Tensor,      # (batch_size, seq_len)
+    logits: Tensor,
+    targets: Tensor,
     ignore_index: int = -100,
-    reduction: str = "mean",
 ) -> Tensor:
     """
-    Cross-entropy para modelo de lenguaje autoregresivo.
+    Cross-entropy promedio por token.
 
-    Asume que `target_ids[t]` es el token "siguiente" a predecir
-    para la posición correspondiente de `logits[t]`.
+    logits:  (B, T, V)
+    targets: (B, T)  (token ids) o (B, T) con ignore_index para padding/masking
 
-    ignore_index:
-        Útil si en el futuro queremos enmascarar posiciones (por ejemplo,
-        padding) y que NO contribuyan a la loss.
+    Devuelve: scalar tensor (mean loss)
     """
-    # Aplanamos batch y secuencia para usar F.cross_entropy
+    if logits.ndim != 3:
+        raise ValueError(f"logits must be (B,T,V). Got shape={tuple(logits.shape)}")
+    if targets.ndim != 2:
+        raise ValueError(f"targets must be (B,T). Got shape={tuple(targets.shape)}")
+
+    # Asegurar dtype correcto
+    if targets.dtype != torch.long:
+        targets = targets.long()
+
     B, T, V = logits.shape
+    logits_2d = logits.reshape(B * T, V)
+    targets_1d = targets.reshape(B * T)
 
-    logits_flat = logits.view(B * T, V)      # (B*T, V)
-    targets_flat = target_ids.view(B * T)    # (B*T,)
-
+    # IMPORTANT: reduction="mean" => per-token mean
     loss = F.cross_entropy(
-        logits_flat,
-        targets_flat,
+        logits_2d,
+        targets_1d,
         ignore_index=ignore_index,
-        reduction=reduction,
+        reduction="mean",
     )
     return loss
-
-
-def lm_token_accuracy(
-    logits: Tensor,
-    target_ids: Tensor,
-    ignore_index: int = -100,
-) -> Tensor:
-    """
-    Accuracy simple por token (solo para monitoreo en validación).
-    """
-    B, T, V = logits.shape
-    preds = logits.argmax(dim=-1)  # (B, T)
-
-    mask = target_ids != ignore_index
-    correct = (preds == target_ids) & mask
-
-    # Evitar división entre cero si todo está ignorado
-    total = mask.sum().clamp(min=1)
-    acc = correct.sum().float() / total.float()
-    return acc
