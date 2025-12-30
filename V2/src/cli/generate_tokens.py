@@ -252,27 +252,22 @@ def main() -> None:
     sd = ckpt["model_state_dict"]
 
     model_cfg = ckpt.get("model_config", None)
-    if model_cfg is not None and isinstance(model_cfg, dict) and len(model_cfg) > 0:
-        cfg_dict = dict(model_cfg)
-    else:
-        # fallback legacy (older ckpts)
-        arch = infer_arch_from_state_dict(sd)
-        cfg_dict = {
-            "vocab_size": arch["vocab_size"],
-            "d_model": arch["d_model"],
-            "n_layers": arch["n_layers"],
-            "n_heads": args.n_heads,
-            "max_seq_len": arch["max_seq_len"],
-            "dropout": 0.0,
-        }
+if model_cfg is not None and isinstance(model_cfg, dict) and len(model_cfg) > 0:
+    # ✅ Keep only keys that GPTConfig understands
+    allowed = {"vocab_size", "d_model", "n_layers", "n_heads", "max_seq_len", "dropout"}
+    cfg_dict = {k: model_cfg[k] for k in allowed if k in model_cfg}
+else:
+    arch = infer_arch_from_state_dict(sd)
+    cfg_dict = {
+        "vocab_size": arch["vocab_size"],
+        "d_model": arch["d_model"],
+        "n_layers": arch["n_layers"],
+        "n_heads": args.n_heads,
+        "max_seq_len": arch["max_seq_len"],
+        "dropout": 0.0,
+    }
 
-    # Safety: if legacy path, validate divisibility
-    if int(cfg_dict["d_model"]) % int(cfg_dict["n_heads"]) != 0:
-        raise ValueError(
-            f"d_model={cfg_dict['d_model']} must be divisible by n_heads={cfg_dict['n_heads']}"
-        )
-
-    cfg = GPTConfig(**cfg_dict)
+cfg = GPTConfig(**cfg_dict)
 
     device = torch.device(args.device)
     model = GPTModel(cfg).to(device)
