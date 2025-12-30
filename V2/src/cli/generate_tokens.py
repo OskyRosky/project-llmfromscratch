@@ -14,10 +14,12 @@ from src.model.gpt import GPTModel, GPTConfig
 try:
     from tokenizers import Tokenizer  # HF tokenizers
 except ImportError as e:
-    raise ImportError(
-        "Missing dependency: tokenizers. Install with: pip install tokenizers"
-    ) from e
+    raise ImportError("Missing dependency: tokenizers. Install with: pip install tokenizers") from e
 
+
+# -------------------------
+# IO helpers
+# -------------------------
 
 def load_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -54,10 +56,13 @@ def resolve_tokenizer_path(meta_path: str, tokenizer_path: str) -> str:
         return candidate3
 
     raise FileNotFoundError(
-        f"Tokenizer file not found. Tried:\n"
-        f"- {tokenizer_path}\n- {candidate}\n- {candidate2}\n- {candidate3}\n"
-        f"Tip: store tokenizer_path as a relative path in meta.json for portability, "
-        f"or pass --tokenizer_path to override."
+        "Tokenizer file not found. Tried:\n"
+        f"- {tokenizer_path}\n"
+        f"- {candidate}\n"
+        f"- {candidate2}\n"
+        f"- {candidate3}\n"
+        "Tip: store tokenizer_path as a relative path in meta.json for portability, "
+        "or pass --tokenizer_path to override."
     )
 
 
@@ -69,9 +74,9 @@ def resolve_pack(pack_dir: str) -> Tuple[str, str, str, Optional[str]]:
       <pack_dir>/
         meta.json
         tokenizer.json
-        config.json   (optional, currently not required)
+        config.json   (optional)
       <pack_dir>/../
-        ckpt_final_step_5000.pt  (default ckpt name)
+        ckpt_final_step_5000.pt  (default)
 
     Returns:
       meta_path, ckpt_path, tokenizer_path, config_path_or_None
@@ -100,6 +105,10 @@ def resolve_pack(pack_dir: str) -> Tuple[str, str, str, Optional[str]]:
     return str(meta_path), str(ckpt_path), str(tok_path), config_path
 
 
+# -------------------------
+# Model helpers
+# -------------------------
+
 def infer_arch_from_state_dict(sd: Dict[str, torch.Tensor]) -> Dict[str, int]:
     vocab_size, d_model = sd["tok_embedding.embedding.weight"].shape
     max_seq_len = sd["pos_embedding.pos_embedding.weight"].shape[0]
@@ -120,6 +129,32 @@ def infer_arch_from_state_dict(sd: Dict[str, torch.Tensor]) -> Dict[str, int]:
     }
 
 
+def cfg_from_ckpt_or_fallback(
+    ckpt: Dict[str, Any],
+    sd: Dict[str, torch.Tensor],
+    legacy_n_heads: int,
+) -> Dict[str, Any]:
+    """
+    Prefer ckpt['model_config'] (new checkpoints), but filter to keys
+    that GPTConfig actually supports. Otherwise infer from state_dict.
+    """
+    model_cfg = ckpt.get("model_config", None)
+    if isinstance(model_cfg, dict) and len(model_cfg) > 0:
+        allowed = {"vocab_size", "d_model", "n_layers", "n_heads", "max_seq_len", "dropout"}
+        cfg_dict = {k: model_cfg[k] for k in allowed if k in model_cfg}
+        return cfg_dict
+
+    arch = infer_arch_from_state_dict(sd)
+    return {
+        "vocab_size": arch["vocab_size"],
+        "d_model": arch["d_model"],
+        "n_layers": arch["n_layers"],
+        "n_heads": int(legacy_n_heads),
+        "max_seq_len": arch["max_seq_len"],
+        "dropout": 0.0,
+    }
+
+
 @torch.no_grad()
 def generate(
     model: GPTModel,
@@ -132,21 +167,18 @@ def generate(
 ) -> torch.Tensor:
     """
     Decoding policy:
-      - top_k == 0  -> GREEDY (deterministic). temperature is ignored upstream.
+      - top_k == 0  -> GREEDY (deterministic). temperature ignored.
       - top_k > 0   -> top-k sampling. temperature applies.
     """
     model.eval()
+    greedy = (top_k == 0)
 
     for _ in range(max_new_tokens):
         idx = input_ids[:, -block_size:]
-        logits = model(idx)              # (B, T, V)
-        logits = logits[:, -1, :]        # (B, V)
+        logits = model(idx)[:, -1, :]  # (B, V)
 
-        if top_k and top_k > 0:
-            # Sampling mode: temperature matters
-            if temperature is None or temperature <= 0:
-                temperature = 1.0
-            logits = logits / float(temperature)
+        if not greedy:
+            logits = logits / max(float(temperature), 1e-6)
 
             k = min(int(top_k), logits.size(-1))
             v, _ = torch.topk(logits, k=k, dim=-1)
@@ -156,7 +188,6 @@ def generate(
             probs = torch.softmax(logits, dim=-1)
             next_id = torch.multinomial(probs, num_samples=1)
         else:
-            # Greedy mode (deterministic)
             next_id = torch.argmax(logits, dim=-1, keepdim=True)
 
         input_ids = torch.cat([input_ids, next_id], dim=1)
@@ -167,12 +198,16 @@ def generate(
     return input_ids
 
 
+# -------------------------
+# Main
+# -------------------------
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Generate text from a token-level GPT checkpoint (BPE tokenizer)."
     )
 
-    # ✅ Pack mode (portable)
+    # Pack mode
     ap.add_argument(
         "--pack",
         type=str,
@@ -193,17 +228,16 @@ def main() -> None:
         "--top_k",
         type=int,
         default=0,
-        help="Decoding mode: 0 = greedy (deterministic, recommended for eval). "
-             ">0 = top-k sampling (stochastic).",
+        help="0 = greedy (deterministic, recommended for eval). >0 = top-k sampling.",
     )
     ap.add_argument(
         "--temperature",
         type=float,
         default=1.0,
-        help="Sampling temperature (only used when top_k > 0). For greedy eval keep default 1.0.",
+        help="Sampling temperature (only used when top_k > 0). For greedy eval keep 1.0.",
     )
 
-    # Legacy compatibility: only used if ckpt has NO model_config
+    # Only used if ckpt lacks model_config
     ap.add_argument(
         "--n_heads",
         type=int,
@@ -211,7 +245,7 @@ def main() -> None:
         help="Legacy only: used when checkpoint lacks model_config. Must match training.",
     )
 
-    ap.add_argument("--seed", type=int, default=42, help="Only affects stochastic sampling (top_k > 0).")
+    ap.add_argument("--seed", type=int, default=42, help="Only affects sampling (top_k > 0).")
 
     # Tokenizer override
     ap.add_argument(
@@ -222,12 +256,9 @@ def main() -> None:
     )
 
     args = ap.parse_args()
-
     torch.manual_seed(args.seed)
 
-    # -----------------------
-    # Resolve inputs (pack OR legacy)
-    # -----------------------
+    # Resolve pack
     if args.pack:
         meta_path, ckpt_path, tok_path, _cfg_path = resolve_pack(args.pack)
         args.meta = meta_path
@@ -235,40 +266,24 @@ def main() -> None:
         args.tokenizer_path = tok_path
 
     if not args.meta or not args.ckpt:
-        raise ValueError(
-            "Either use --pack OR provide --meta and --ckpt (and tokenizer via meta or --tokenizer_path)."
-        )
+        raise ValueError("Either use --pack OR provide --meta and --ckpt.")
 
+    # Load meta + tokenizer
     meta = load_json(args.meta)
-
     tok_path_raw = args.tokenizer_path or meta["tokenizer_path"]
     tok_path = resolve_tokenizer_path(args.meta, tok_path_raw)
     tokenizer = Tokenizer.from_file(tok_path)
 
-    # -----------------------
-    # Load checkpoint + config (prefer ckpt model_config)
-    # -----------------------
+    # Load checkpoint
     ckpt = torch.load(args.ckpt, map_location="cpu")
     sd = ckpt["model_state_dict"]
 
-    model_cfg = ckpt.get("model_config", None)
-if model_cfg is not None and isinstance(model_cfg, dict) and len(model_cfg) > 0:
-    # ✅ Keep only keys that GPTConfig understands
-    allowed = {"vocab_size", "d_model", "n_layers", "n_heads", "max_seq_len", "dropout"}
-    cfg_dict = {k: model_cfg[k] for k in allowed if k in model_cfg}
-else:
-    arch = infer_arch_from_state_dict(sd)
-    cfg_dict = {
-        "vocab_size": arch["vocab_size"],
-        "d_model": arch["d_model"],
-        "n_layers": arch["n_layers"],
-        "n_heads": args.n_heads,
-        "max_seq_len": arch["max_seq_len"],
-        "dropout": 0.0,
-    }
+    # Prefer ckpt model_config; fallback to inference from sd
+    cfg_dict = cfg_from_ckpt_or_fallback(ckpt, sd, legacy_n_heads=args.n_heads)
 
-cfg = GPTConfig(**cfg_dict)
+    cfg = GPTConfig(**cfg_dict)
 
+    # Build model
     device = torch.device(args.device)
     model = GPTModel(cfg).to(device)
 
@@ -282,7 +297,7 @@ cfg = GPTConfig(**cfg_dict)
 
     model.eval()
 
-    # ✅ Policy guard: temperature irrelevant in greedy mode.
+    # Greedy guard: temperature irrelevant
     if args.top_k == 0 and args.temperature != 1.0:
         print(
             f"[INFO] Greedy mode (top_k=0): ignoring temperature={args.temperature}. "
@@ -292,9 +307,7 @@ cfg = GPTConfig(**cfg_dict)
     else:
         temperature = float(args.temperature)
 
-    # -----------------------
-    # Tokenize + Generate
-    # -----------------------
+    # Tokenize + generate
     enc = tokenizer.encode(args.prompt)
     input_ids = torch.tensor([enc.ids], dtype=torch.long, device=device)
 
