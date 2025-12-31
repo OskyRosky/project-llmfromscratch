@@ -202,14 +202,17 @@ def generate(
     tokenizer: Optional[Tokenizer] = None,
     stop_at_period: bool = False,
     period_id: int = 19,
+    min_period_tokens: int = 2,  # ✅ NUEVO: mínimo antes de permitir parar por '.'
 ) -> torch.Tensor:
     """
     Decoding policy:
       - top_k == 0  -> GREEDY (deterministic). temperature ignored.
       - top_k > 0   -> top-k sampling. temperature applies.
+
     Stop policy:
-      - Stop on eos_id (if provided)
-      - Optionally stop when '.' token appears (period_id), after min_new_tokens
+      - Stop on eos_id (si se provee)
+      - Opcionalmente: stop cuando salga '.' (period_id), pero solo después de min_period_tokens
+        (independiente de min_new_tokens)
     """
     model.eval()
     greedy = (top_k == 0)
@@ -288,8 +291,8 @@ def generate(
         if eos_id is not None and int(next_id.item()) == int(eos_id):
             break
 
-        # ✅ Optional: stop on '.' after min_new_tokens
-        if stop_at_period and t >= int(min_new_tokens) - 1:
+        # ✅ Optional: stop on '.' after min_period_tokens (independiente de min_new_tokens)
+        if stop_at_period and t >= int(min_period_tokens) - 1:
             if int(next_id.item()) == int(period_id):
                 break
 
@@ -336,13 +339,19 @@ def main() -> None:
         "--stop_at_period",
         type=int,
         default=1,
-        help="1=yes stop when '.' token is generated (after min_new_tokens).",
+        help="1=yes stop when '.' token is generated (after min_period_tokens).",
     )
     ap.add_argument(
         "--period_id",
         type=int,
         default=19,
         help="Token id for '.' (default 19 for your tokenizer).",
+    )
+    ap.add_argument(
+        "--min_period_tokens",
+        type=int,
+        default=2,
+        help="Minimum number of generated tokens before allowing stop-at-period (independent of min_new_tokens).",
     )
 
     # Output control
@@ -352,6 +361,7 @@ def main() -> None:
         default=1,
         help="1=print only generated continuation (answer). 0=print full prompt+answer.",
     )
+
     # Legacy config
     ap.add_argument("--n_heads", type=int, default=4)
 
@@ -430,6 +440,7 @@ def main() -> None:
         tokenizer=tokenizer,
         stop_at_period=bool(int(args.stop_at_period)),
         period_id=int(args.period_id),
+        min_period_tokens=int(args.min_period_tokens),
     )
 
     full_ids = out_ids[0].tolist()
