@@ -175,7 +175,7 @@ def main():
         opt.zero_grad(set_to_none=True)
 
         logits = model(x)  # expected (B,T,V)
-        loss = language_modeling_loss(logits, y)
+        loss = language_modeling_loss(logits, y, loss_mask=mask, pad_id=pad_id)
 
         loss.backward()
         opt.step()
