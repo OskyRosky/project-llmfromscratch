@@ -326,15 +326,32 @@ def main() -> None:
     ap.add_argument("--no_repeat_ngram", type=int, default=0)
 
     # Guards
-    ap.add_argument("--min_new_tokens", type=int, default=8)
-    ap.add_argument("--forbid_special", type=int, default=1)
-    ap.add_argument("--ban_replacement", type=int, default=1)
-    ap.add_argument("--debug_next", type=int, default=0)
+    ap.add_argument("--min_new_tokens", type=int, default=8, help="Forbid EOS until at least N new tokens.")
+    ap.add_argument("--forbid_special", type=int, default=1, help="1=yes ban pad/bos/instr/resp during gen.")
+    ap.add_argument("--ban_replacement", type=int, default=1, help="1=yes ban tokens that decode to '�'.")
+    ap.add_argument("--debug_next", type=int, default=0, help="Print first N generated tokens (id + token).")
 
-    # ✅ Short-answer stop
-    ap.add_argument("--stop_at_period", type=int, default=1, help="1=yes stop when '.' is generated (after min_new_tokens).")
-    ap.add_argument("--period_id", type=int, default=19, help="Token id for '.' (default 19 for your tokenizer).")
+    # Short-answer stop (optional)
+    ap.add_argument(
+        "--stop_at_period",
+        type=int,
+        default=1,
+        help="1=yes stop when '.' token is generated (after min_new_tokens).",
+    )
+    ap.add_argument(
+        "--period_id",
+        type=int,
+        default=19,
+        help="Token id for '.' (default 19 for your tokenizer).",
+    )
 
+    # Output control
+    ap.add_argument(
+        "--print_answer_only",
+        type=int,
+        default=1,
+        help="1=print only generated continuation (answer). 0=print full prompt+answer.",
+    )
     # Legacy config
     ap.add_argument("--n_heads", type=int, default=4)
 
@@ -415,7 +432,14 @@ def main() -> None:
         period_id=int(args.period_id),
     )
 
-    print(tokenizer.decode(out_ids[0].tolist()))
+    full_ids = out_ids[0].tolist()
+    prompt_len = len(enc.ids)
+
+    if int(args.print_answer_only) == 1:
+        answer_ids = full_ids[prompt_len:]
+        print(tokenizer.decode(answer_ids))
+    else:
+        print(tokenizer.decode(full_ids))
 
 
 if __name__ == "__main__":
