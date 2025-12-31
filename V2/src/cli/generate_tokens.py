@@ -5,14 +5,14 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import torch
 
 from src.model.gpt import GPTModel, GPTConfig
 
 try:
-    from tokenizers import Tokenizer  # HF tokenizers
+    from tokenizers import Tokenizer
 except ImportError as e:
     raise ImportError("Missing dependency: tokenizers. Install with: pip install tokenizers") from e
 
@@ -27,15 +27,6 @@ def load_json(path: str) -> Dict[str, Any]:
 
 
 def resolve_tokenizer_path(meta_path: str, tokenizer_path: str) -> str:
-    """
-    meta.json may store an absolute path (works on your Mac, breaks in Docker/other machines).
-
-    We try, in order:
-      1) tokenizer_path as-is
-      2) relative to meta.json directory
-      3) PROJECT_ROOT/models/tokenizers/oscar_bpe_v4/<basename>
-      4) meta_dir/<basename>
-    """
     if os.path.exists(tokenizer_path):
         return tokenizer_path
 
@@ -46,7 +37,7 @@ def resolve_tokenizer_path(meta_path: str, tokenizer_path: str) -> str:
         return candidate
 
     base = os.path.basename(tokenizer_path)
-    project_root = os.path.abspath(os.path.join(meta_dir, "..", "..", ".."))  # best-effort
+    project_root = os.path.abspath(os.path.join(meta_dir, "..", "..", ".."))
     candidate2 = os.path.join(project_root, "models", "tokenizers", "oscar_bpe_v4", base)
     if os.path.exists(candidate2):
         return candidate2
@@ -61,26 +52,10 @@ def resolve_tokenizer_path(meta_path: str, tokenizer_path: str) -> str:
         f"- {candidate}\n"
         f"- {candidate2}\n"
         f"- {candidate3}\n"
-        "Tip: store tokenizer_path as a relative path in meta.json for portability, "
-        "or pass --tokenizer_path to override."
     )
 
 
 def resolve_pack(pack_dir: str) -> Tuple[str, str, str, Optional[str]]:
-    """
-    Resolve portable inference pack.
-
-    Expected layout:
-      <pack_dir>/
-        meta.json
-        tokenizer.json
-        config.json   (optional)
-      <pack_dir>/../
-        ckpt_final_step_5000.pt  (default)
-
-    Returns:
-      meta_path, ckpt_path, tokenizer_path, config_path_or_None
-    """
     pdir = Path(pack_dir)
     if not pdir.exists():
         raise FileNotFoundError(f"--pack not found: {pdir}")
@@ -134,14 +109,12 @@ def cfg_from_ckpt_or_fallback(
     sd: Dict[str, torch.Tensor],
     legacy_n_heads: int,
 ) -> Dict[str, Any]:
-    """
-    Prefer ckpt['model_config'] (new checkpoints), but filter to keys
-    that GPTConfig actually supports. Otherwise infer from state_dict.
-    """
     model_cfg = ckpt.get("model_config", None)
     if isinstance(model_cfg, dict) and len(model_cfg) > 0:
         allowed = {"vocab_size", "d_model", "n_layers", "n_heads", "max_seq_len", "dropout"}
         cfg_dict = {k: model_cfg[k] for k in allowed if k in model_cfg}
+        cfg_dict.setdefault("dropout", 0.0)
+        cfg_dict["n_heads"] = int(cfg_dict.get("n_heads", legacy_n_heads))
         return cfg_dict
 
     arch = infer_arch_from_state_dict(sd)
@@ -155,59 +128,123 @@ def cfg_from_ckpt_or_fallback(
     }
 
 
+# -------------------------
+# Decoding helpers
+# -------------------------
+
+def apply_repetition_penalty(logits: torch.Tensor, prev_ids: torch.Tensor, penalty: float) -> torch.Tensor:
+    """
+    logits: (B, V)
+    prev_ids: (B, Tprev)
+    penalty > 1.0 reduces probability of already-seen tokens (deterministic).
+    """
+    if penalty is None or penalty <= 1.0:
+        return logits
+
+    # unique tokens per batch
+    for b in range(logits.size(0)):
+        seen = torch.unique(prev_ids[b])
+        # If logit > 0 -> divide; if logit < 0 -> multiply (standard rep-penalty trick)
+        lb = logits[b]
+        lb_seen = lb[seen]
+        lb[seen] = torch.where(lb_seen > 0, lb_seen / penalty, lb_seen * penalty)
+        logits[b] = lb
+    return logits
+
+
+def calc_banned_tokens_no_repeat_ngram(
+    input_ids: List[int],
+    no_repeat_ngram: int,
+) -> List[int]:
+    """
+    Returns a list of token ids that would create a repeated ngram if generated next.
+    Deterministic.
+    """
+    n = int(no_repeat_ngram)
+    if n <= 0 or len(input_ids) < n:
+        return []
+
+    # build mapping: prefix (n-1 tokens) -> set(next_tokens)
+    prefix_len = n - 1
+    ngrams = {}
+    for i in range(len(input_ids) - n + 1):
+        prefix = tuple(input_ids[i : i + prefix_len])
+        nxt = input_ids[i + prefix_len]
+        ngrams.setdefault(prefix, set()).add(nxt)
+
+    current_prefix = tuple(input_ids[-prefix_len:])
+    banned = list(ngrams.get(current_prefix, set()))
+    return banned
+
+
 @torch.no_grad()
 def generate(
     model: GPTModel,
     input_ids: torch.Tensor,
     max_new_tokens: int,
     block_size: int,
-    temperature: float = 1.0,
     top_k: int = 0,
+    temperature: float = 1.0,
     eos_id: Optional[int] = None,
-    repetition_penalty: float = 1.0,   # ✅ NEW
+    repetition_penalty: float = 1.0,
+    no_repeat_ngram: int = 0,
+    forbid_ids: Optional[List[int]] = None,
+    min_new_tokens: int = 0,
 ) -> torch.Tensor:
     """
-    Decoding policy:
-      - top_k == 0  -> GREEDY (deterministic). temperature ignored.
-      - top_k > 0   -> top-k sampling. temperature applies.
-
-    Anti-loop (deterministic):
-      - repetition_penalty > 1.0 penalizes already-generated tokens.
-        Works in greedy and sampling.
+    Greedy by default (top_k=0). Deterministic safety knobs:
+      - repetition_penalty
+      - no_repeat_ngram
+      - forbid_ids
+      - min_new_tokens (avoid immediate EOS)
     """
     model.eval()
-    greedy = (top_k == 0)
+    greedy = (int(top_k) == 0)
 
-    rep_pen = float(repetition_penalty) if repetition_penalty is not None else 1.0
-    use_rep_pen = rep_pen > 1.0
+    if forbid_ids is None:
+        forbid_ids = []
 
-    for _ in range(max_new_tokens):
-        idx = input_ids[:, -block_size:]
+    device = input_ids.device
+    forbid_ids_t = torch.tensor(forbid_ids, dtype=torch.long, device=device) if len(forbid_ids) else None
+
+    for t in range(int(max_new_tokens)):
+        idx = input_ids[:, -int(block_size):]
         logits = model(idx)[:, -1, :]  # (B, V)
 
-        # ✅ Repetition penalty (per sample)
-        # Penalize tokens that already appeared in the generated sequence so far.
-        if use_rep_pen:
+        # Deterministic: repetition penalty
+        logits = apply_repetition_penalty(logits, input_ids, float(repetition_penalty))
+
+        # Deterministic: forbid certain ids
+        if forbid_ids_t is not None and forbid_ids_t.numel() > 0:
+            logits[:, forbid_ids_t] = -1e10
+
+        # Deterministic: no-repeat-ngram (greedy only; still deterministic even if sampling, but simplest here)
+        if int(no_repeat_ngram) > 0:
             for b in range(logits.size(0)):
-                prev = input_ids[b].unique()
-                logits[b, prev] = logits[b, prev] / rep_pen
+                hist = input_ids[b].tolist()
+                banned = calc_banned_tokens_no_repeat_ngram(hist, int(no_repeat_ngram))
+                if banned:
+                    logits[b, torch.tensor(banned, device=device, dtype=torch.long)] = -1e10
 
-        if not greedy:
-            logits = logits / max(float(temperature), 1e-6)
+        # Deterministic: avoid EOS too early
+        if eos_id is not None and int(min_new_tokens) > 0 and t < int(min_new_tokens):
+            logits[:, int(eos_id)] = -1e10
 
+        if greedy:
+            next_id = torch.argmax(logits, dim=-1, keepdim=True)
+        else:
+            temp = max(float(temperature), 1e-6)
+            logits = logits / temp
             k = min(int(top_k), logits.size(-1))
             v, _ = torch.topk(logits, k=k, dim=-1)
             cutoff = v[:, -1].unsqueeze(-1)
             logits = torch.where(logits < cutoff, torch.full_like(logits, -1e10), logits)
-
             probs = torch.softmax(logits, dim=-1)
             next_id = torch.multinomial(probs, num_samples=1)
-        else:
-            next_id = torch.argmax(logits, dim=-1, keepdim=True)
 
         input_ids = torch.cat([input_ids, next_id], dim=1)
 
-        if eos_id is not None and int(next_id.item()) == int(eos_id):
+        if eos_id is not None and int(next_id.item()) == int(eos_id) and t >= int(min_new_tokens):
             break
 
     return input_ids
@@ -218,72 +255,35 @@ def generate(
 # -------------------------
 
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Generate text from a token-level GPT checkpoint (BPE tokenizer)."
-    )
+    ap = argparse.ArgumentParser(description="Generate text from a token-level GPT checkpoint (BPE).")
 
-    # Pack mode
-    ap.add_argument(
-        "--pack",
-        type=str,
-        default=None,
-        help="Path to inference_pack directory. If set, auto-resolves meta/ckpt/tokenizer.",
-    )
-
-    # Legacy inputs (still supported)
-    ap.add_argument("--meta", type=str, help="Path to meta.json for the tokenized dataset.")
+    ap.add_argument("--pack", type=str, default=None, help="Path to inference_pack directory.")
+    ap.add_argument("--meta", type=str, help="Path to meta.json.")
     ap.add_argument("--ckpt", type=str, help="Path to checkpoint .pt file.")
+    ap.add_argument("--tokenizer_path", type=str, default=None, help="Override tokenizer.json path.")
 
-    ap.add_argument("--prompt", type=str, required=True, help="Prompt text to generate from.")
+    ap.add_argument("--prompt", type=str, required=True)
     ap.add_argument("--device", type=str, default="cpu", help="cpu | mps | cuda")
-    ap.add_argument("--max_new_tokens", type=int, default=128, help="How many new tokens to generate.")
+    ap.add_argument("--max_new_tokens", type=int, default=128)
 
-    # Decoding controls (default greedy)
-    ap.add_argument(
-        "--top_k",
-        type=int,
-        default=0,
-        help="0 = greedy (deterministic, recommended for eval). >0 = top-k sampling.",
-    )
-    ap.add_argument(
-        "--temperature",
-        type=float,
-        default=1.0,
-        help="Sampling temperature (only used when top_k > 0). For greedy eval keep 1.0.",
-    )
+    ap.add_argument("--top_k", type=int, default=0, help="0=greedy. >0=top-k sampling.")
+    ap.add_argument("--temperature", type=float, default=1.0)
 
-    # ✅ NEW: deterministic anti-loop
-    ap.add_argument(
-        "--repetition_penalty",
-        type=float,
-        default=1.0,
-        help="Deterministic anti-loop. 1.0 = off. Try 1.1–1.2 for Spanish to reduce repetitions.",
-    )
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--n_heads", type=int, default=4, help="Legacy only if ckpt lacks model_config.")
 
-    # Only used if ckpt lacks model_config
-    ap.add_argument(
-        "--n_heads",
-        type=int,
-        default=4,
-        help="Legacy only: used when checkpoint lacks model_config. Must match training.",
-    )
-
-    ap.add_argument("--seed", type=int, default=42, help="Only affects sampling (top_k > 0).")
-
-    # Tokenizer override
-    ap.add_argument(
-        "--tokenizer_path",
-        type=str,
-        default=None,
-        help="Optional override path to tokenizer.json. If not set, uses meta.json tokenizer_path.",
-    )
+    # Deterministic anti-loop knobs
+    ap.add_argument("--repetition_penalty", type=float, default=1.0, help="1.0 disables. Try 1.1–1.2.")
+    ap.add_argument("--no_repeat_ngram", type=int, default=0, help="0 disables. Try 3.")
+    ap.add_argument("--forbid_special", type=int, default=0, help="1 forbids special tokens during generation.")
+    ap.add_argument("--min_new_tokens", type=int, default=0, help="If >0, EOS cannot appear before this.")
 
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
     # Resolve pack
     if args.pack:
-        meta_path, ckpt_path, tok_path, _cfg_path = resolve_pack(args.pack)
+        meta_path, ckpt_path, tok_path, _ = resolve_pack(args.pack)
         args.meta = meta_path
         args.ckpt = ckpt_path
         args.tokenizer_path = tok_path
@@ -291,60 +291,46 @@ def main() -> None:
     if not args.meta or not args.ckpt:
         raise ValueError("Either use --pack OR provide --meta and --ckpt.")
 
-    # Load meta + tokenizer
     meta = load_json(args.meta)
     tok_path_raw = args.tokenizer_path or meta["tokenizer_path"]
     tok_path = resolve_tokenizer_path(args.meta, tok_path_raw)
     tokenizer = Tokenizer.from_file(tok_path)
 
-    # Load checkpoint
     ckpt = torch.load(args.ckpt, map_location="cpu")
     sd = ckpt["model_state_dict"]
 
-    # Prefer ckpt model_config; fallback to inference from sd
-    cfg_dict = cfg_from_ckpt_or_fallback(ckpt, sd, legacy_n_heads=args.n_heads)
-
+    cfg_dict = cfg_from_ckpt_or_fallback(ckpt, sd, legacy_n_heads=int(args.n_heads))
     cfg = GPTConfig(**cfg_dict)
 
-    # Build model
     device = torch.device(args.device)
     model = GPTModel(cfg).to(device)
-
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    if missing or unexpected:
-        print("WARNING: load_state_dict not strict.")
-        if missing:
-            print("  Missing keys (sample):", missing[:10])
-        if unexpected:
-            print("  Unexpected keys (sample):", unexpected[:10])
-
+    model.load_state_dict(sd, strict=False)
     model.eval()
 
-    # Greedy guard: temperature irrelevant
-    if args.top_k == 0 and args.temperature != 1.0:
-        print(
-            f"[INFO] Greedy mode (top_k=0): ignoring temperature={args.temperature}. "
-            "Use --top_k > 0 to enable sampling."
-        )
-        temperature = 1.0
-    else:
-        temperature = float(args.temperature)
+    eos_id = meta.get("special_ids", {}).get("eos", None)
 
-    # Tokenize + generate
+    # forbid special ids if requested (pad/unk/bos/eos/instr/resp)
+    forbid_ids = []
+    if int(args.forbid_special) == 1:
+        sid = meta.get("special_ids", {})
+        forbid_ids = [int(sid[k]) for k in ["pad", "unk", "bos", "instr", "resp"] if k in sid]
+        # NOTE: we do NOT forbid eos globally; min_new_tokens handles early stop.
+
     enc = tokenizer.encode(args.prompt)
     input_ids = torch.tensor([enc.ids], dtype=torch.long, device=device)
-
-    eos_id = meta.get("special_ids", {}).get("eos", None)
 
     out_ids = generate(
         model=model,
         input_ids=input_ids,
-        max_new_tokens=args.max_new_tokens,
+        max_new_tokens=int(args.max_new_tokens),
         block_size=int(cfg.max_seq_len),
-        temperature=temperature,
         top_k=int(args.top_k),
-        eos_id=eos_id,
+        temperature=float(args.temperature),
+        eos_id=int(eos_id) if eos_id is not None else None,
         repetition_penalty=float(args.repetition_penalty),
+        no_repeat_ngram=int(args.no_repeat_ngram),
+        forbid_ids=forbid_ids,
+        min_new_tokens=int(args.min_new_tokens),
     )
 
     print(tokenizer.decode(out_ids[0].tolist()))
