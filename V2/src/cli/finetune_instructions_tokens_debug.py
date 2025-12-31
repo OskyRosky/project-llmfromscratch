@@ -47,6 +47,21 @@ def infer_arch_from_state_dict(sd: Dict[str, torch.Tensor]) -> Dict[str, int]:
     }
 
 
+def shift_mask_for_targets(mask_x: torch.Tensor) -> torch.Tensor:
+    """
+    mask_x is aligned to x[t] positions.
+    But CE compares logits[t] vs targets y[t] (= x[t+1]).
+
+    So we need mask_y[t] = mask_x[t+1].
+    """
+    if mask_x.ndim != 2:
+        raise ValueError(f"mask must be (B,T). Got {tuple(mask_x.shape)}")
+    mask_y = torch.zeros_like(mask_x, dtype=torch.bool)
+    mask_y[:, :-1] = mask_x[:, 1:]
+    mask_y[:, -1] = False
+    return mask_y
+
+
 def main():
     ap = argparse.ArgumentParser("Debug instruction-tuning (token-level)")
     ap.add_argument("--meta", type=str, required=True)
@@ -64,13 +79,8 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=42)
 
-    # only used if base_ckpt is legacy (missing model_config)
-    ap.add_argument(
-        "--n_heads",
-        type=int,
-        default=4,
-        help="Legacy only: used when base_ckpt lacks model_config.",
-    )
+    # used if base_ckpt is legacy (missing model_config)
+    ap.add_argument("--n_heads", type=int, default=4)
 
     args = ap.parse_args()
     torch.manual_seed(args.seed)
@@ -79,7 +89,8 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     meta = load_json(args.meta)
-    pad_id = int(meta["special_ids"]["pad"])
+    special_ids = meta["special_ids"]
+    pad_id = int(special_ids["pad"])
 
     # -----------------------
     # Dataset + DataLoader
@@ -92,10 +103,7 @@ def main():
     )
 
     if len(ds) == 0:
-        raise ValueError(
-            f"Instruction dataset is empty: {args.jsonl}. "
-            "Check file path and JSONL format."
-        )
+        raise ValueError(f"Instruction dataset is empty: {args.jsonl}")
 
     dl = DataLoader(
         ds,
@@ -106,8 +114,7 @@ def main():
 
     if len(dl) == 0:
         raise ValueError(
-            f"DataLoader produced 0 batches. len(ds)={len(ds)} batch_size={args.batch_size}. "
-            "Fix by lowering --batch_size (<= len(dataset)) or keep drop_last=False."
+            f"DataLoader produced 0 batches. len(ds)={len(ds)} batch_size={args.batch_size}."
         )
 
     it = cycle(dl)
@@ -118,7 +125,6 @@ def main():
     ckpt = torch.load(args.base_ckpt, map_location="cpu")
     sd = ckpt["model_state_dict"]
 
-    # Prefer model_config if present
     model_cfg = ckpt.get("model_config", None)
 
     if isinstance(model_cfg, dict) and len(model_cfg) > 0:
@@ -127,7 +133,6 @@ def main():
         cfg_dict.setdefault("dropout", 0.0)
         cfg_dict["n_heads"] = int(cfg_dict.get("n_heads", args.n_heads))
     else:
-        # Legacy fallback
         arch = infer_arch_from_state_dict(sd)
         cfg_dict = {
             "vocab_size": int(arch["vocab_size"]),
@@ -138,13 +143,11 @@ def main():
             "dropout": 0.0,
         }
 
-    # Keep consistent seq_len
     cfg_dict["max_seq_len"] = int(args.seq_len)
 
     if int(cfg_dict["d_model"]) % int(cfg_dict["n_heads"]) != 0:
         raise ValueError(
-            f"d_model={cfg_dict['d_model']} must be divisible by n_heads={cfg_dict['n_heads']}. "
-            f"Try --n_heads 4 (or match training)."
+            f"d_model={cfg_dict['d_model']} must be divisible by n_heads={cfg_dict['n_heads']}."
         )
 
     cfg = GPTConfig(**cfg_dict)
@@ -160,16 +163,24 @@ def main():
     # Train loop (debug)
     # -----------------------
     for step in range(1, int(args.steps) + 1):
-        x, y, mask = next(it)
+        x, y, mask_x = next(it)
 
         x = x.to(device)
         y = y.to(device)
-        mask = mask.to(device)  # ✅ critical: avoid CPU vs MPS mismatch
+
+        # 🔥 critical: align mask to targets y (shift by 1)
+        mask_y = shift_mask_for_targets(mask_x).to(device)
 
         opt.zero_grad(set_to_none=True)
 
         logits = model(x)  # (B,T,V)
-        loss = language_modeling_loss(logits, y, loss_mask=mask, pad_id=pad_id)
+
+        loss = language_modeling_loss(
+            logits,
+            y,
+            loss_mask=mask_y,   # aligned to y
+            pad_id=pad_id,
+        )
 
         loss.backward()
         opt.step()
