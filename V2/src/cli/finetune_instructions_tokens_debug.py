@@ -64,7 +64,7 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=42)
 
-    # ✅ only used if base_ckpt is legacy (missing model_config)
+    # only used if base_ckpt is legacy (missing model_config)
     ap.add_argument(
         "--n_heads",
         type=int,
@@ -97,7 +97,6 @@ def main():
             "Check file path and JSONL format."
         )
 
-    # ✅ critical: drop_last=False so small datasets still yield batches
     dl = DataLoader(
         ds,
         batch_size=int(args.batch_size),
@@ -119,21 +118,16 @@ def main():
     ckpt = torch.load(args.base_ckpt, map_location="cpu")
     sd = ckpt["model_state_dict"]
 
-    # Prefer model_config if present (new ckpts)
+    # Prefer model_config if present
     model_cfg = ckpt.get("model_config", None)
 
     if isinstance(model_cfg, dict) and len(model_cfg) > 0:
-        # ✅ Filter to keys GPTConfig actually accepts
         allowed = {"vocab_size", "d_model", "n_layers", "n_heads", "max_seq_len", "dropout"}
         cfg_dict = {k: model_cfg[k] for k in allowed if k in model_cfg}
-
-        # Safety defaults
         cfg_dict.setdefault("dropout", 0.0)
-
-        # If ckpt forgot n_heads for any reason, fall back to CLI
         cfg_dict["n_heads"] = int(cfg_dict.get("n_heads", args.n_heads))
     else:
-        # ✅ Legacy fallback (your ckpt_final_step_5000.pt)
+        # Legacy fallback
         arch = infer_arch_from_state_dict(sd)
         cfg_dict = {
             "vocab_size": int(arch["vocab_size"]),
@@ -144,10 +138,9 @@ def main():
             "dropout": 0.0,
         }
 
-    # Override seq len for training if you want, but keep it consistent
+    # Keep consistent seq_len
     cfg_dict["max_seq_len"] = int(args.seq_len)
 
-    # Quick sanity
     if int(cfg_dict["d_model"]) % int(cfg_dict["n_heads"]) != 0:
         raise ValueError(
             f"d_model={cfg_dict['d_model']} must be divisible by n_heads={cfg_dict['n_heads']}. "
@@ -167,22 +160,21 @@ def main():
     # Train loop (debug)
     # -----------------------
     for step in range(1, int(args.steps) + 1):
-       x, y, mask = next(it)
-       x = x.to(device)
-       y = y.to(device)
-       mask = mask.to(device)
-        # mask currently not used by language_modeling_loss unless you implemented it; ok for debug.
+        x, y, mask = next(it)
+
+        x = x.to(device)
+        y = y.to(device)
+        mask = mask.to(device)  # ✅ critical: avoid CPU vs MPS mismatch
 
         opt.zero_grad(set_to_none=True)
 
-        logits = model(x)  # expected (B,T,V)
+        logits = model(x)  # (B,T,V)
         loss = language_modeling_loss(logits, y, loss_mask=mask, pad_id=pad_id)
 
         loss.backward()
         opt.step()
 
         if step == 1 or step % 10 == 0 or step == int(args.steps):
-            # optional ppl (helps to see if it's learning)
             ppl = float(torch.exp(loss.detach()).item())
             print(f"[step {step:>3}/{args.steps}] loss={float(loss.detach().item()):.4f} ppl={ppl:.2f}")
 
