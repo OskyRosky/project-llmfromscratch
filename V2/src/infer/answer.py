@@ -251,11 +251,11 @@ def answer_with_meta(
         eos_id=assets.eos_id,
         repetition_penalty=float(repetition_penalty),
         no_repeat_ngram=int(no_repeat_ngram),
-        min_new_tokens=int(min_new_tokens),
+        min_new_tokens=int(max(min_new_tokens, 8) if has_fact else min_new_tokens),
         banned_ids=assets.banned_ids,
         debug_next=0,
         tokenizer=assets.tokenizer,
-        stop_at_period=bool(int(stop_at_period)),
+        stop_at_period=(False if has_fact else bool(int(stop_at_period))),
         period_id=int(period_id),
     )
 
@@ -265,6 +265,12 @@ def answer_with_meta(
     gen_only = full[len(enc.ids):]
     text = assets.tokenizer.decode(gen_only)
     text = _clean_text(text)
+
+    # Si hay HECHO y el modelo se desvía (tiny model), forzamos respuesta grounded
+    if has_fact:
+        low = text.lower()
+        if ("no tengo esa información" in low) or (len(text.strip()) < 5):
+            text = fact.strip()
 
     return text, {
         "used_private_guard": False,
