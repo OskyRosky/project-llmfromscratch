@@ -1,157 +1,173 @@
 # app/streamlit_app.py
-
 import os
 import sys
+from pathlib import Path
 
 import streamlit as st
 
 # ---------------------------------------------------------------------
-# Asegurar que podamos hacer "import src..."
+# Asegurar imports "src..."
 # ---------------------------------------------------------------------
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.append(ROOT)
+ROOT = Path(__file__).resolve().parents[1]  # V2/
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from src.inference.instructions_chat import (  # noqa: E402
-    load_instructions_model,
-    generate_answer,
-    InstructionsModelBundle,
+from src.infer.answer import answer, clear_cache  # noqa: E402
+
+
+# ---------------------------------------------------------------------
+# Config por env (recomendado)
+# ---------------------------------------------------------------------
+DEFAULT_META = os.getenv("LLM_META", "models/tokenized/oscar_bpe_v4/meta.json")
+DEFAULT_TOK = os.getenv("LLM_TOKENIZER", "models/tokenizers/oscar_bpe_v4/tokenizer.json")
+DEFAULT_CKPT = os.getenv(
+    "LLM_CKPT",
+    "models/checkpoints/instr_mini_run_masked_eos_CLOSE_v4/ckpt_instr_debug.pt",
 )
-from src.inference.faq_fallback import faq_match  # noqa: E402
+DEFAULT_DEVICE = os.getenv("LLM_DEVICE", "mps")
 
 
 # ---------------------------------------------------------------------
-# Configuración básica de la página
+# FAQ fallback (mínimo y determinístico)
+# - Nota: esto es un fallback "perfecto", útil para demo.
+# - Luego lo hacemos fuzzy si querés.
+# ---------------------------------------------------------------------
+FAQ = {
+    "¿cuál es la capital de costa rica?": "San José.",
+    "capital de costa rica": "San José.",
+    "¿cuál es la capital de francia?": "París.",
+    "capital francesa": "París.",
+    "¿los perros son caninos?": "Sí, los perros pertenecen a la familia de los cánidos.",
+    "los perros pertenecen a qué familia": "A la familia de los cánidos.",
+    # Si quieres que estas sean “obvias” en demo, ponlas aquí:
+    "¿cuál es el 5 planeta del sistema solar?": "Júpiter.",
+    "¿cuál es la capital de argentina?": "Buenos Aires.",
+}
+
+def normalize_q(s: str) -> str:
+    return " ".join(s.strip().lower().split())
+
+
+def faq_match(prompt: str) -> str | None:
+    return FAQ.get(normalize_q(prompt))
+
+
+# ---------------------------------------------------------------------
+# Streamlit basic page
 # ---------------------------------------------------------------------
 st.set_page_config(
-    page_title="LLM From Scratch - Instruction Chat",
+    page_title="LLM From Scratch – Token Chat (BPE)",
     page_icon="💬",
     layout="wide",
 )
 
-
-# ---------------------------------------------------------------------
-# Función cacheada para cargar el modelo UNA sola vez
-# ---------------------------------------------------------------------
-@st.cache_resource(show_spinner="Cargando modelo (solo la primera vez)...")
-def get_model_bundle() -> InstructionsModelBundle:
-    """
-    Carga el modelo de instrucciones y lo cachea.
-
-    Dispositivo:
-      - Si existe la variable de entorno LLM_DEVICE, se usa.
-      - Si no, se usa "auto" (cuda/mps/cpu, según disponibilidad).
-    """
-    ckpt_dir = "models/checkpoints_oscar_long"
-
-    device_str = os.environ.get("LLM_DEVICE", "auto")
-    st.write(f"[DEBUG] Cargando modelo en dispositivo: {device_str}")
-
-    bundle = load_instructions_model(
-        ckpt_dir=ckpt_dir,
-        device_str=device_str,
-    )
-    return bundle
-
-
-# ---------------------------------------------------------------------
-# Sidebar: parámetros de generación
-# ---------------------------------------------------------------------
-st.sidebar.header("⚙️ Parámetros de generación")
-
-max_new_tokens = st.sidebar.slider(
-    "max_new_tokens",
-    min_value=10,
-    max_value=200,
-    value=80,
-    step=5,
-)
-
-temperature = st.sidebar.slider(
-    "temperature",
-    min_value=0.0,
-    max_value=1.5,
-    value=0.0,  # igual que en eval_instructions_mini
-    step=0.05,
-)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    "Backend: `gpt_char_instructions.pt` en "
-    "`models/checkpoints_oscar_long/`."
-)
-
-
-# ---------------------------------------------------------------------
-# Layout principal
-# ---------------------------------------------------------------------
-st.title("💬 LLM From Scratch – Instruction Chat (tiny)")
+st.title("💬 LLM From Scratch – Token Chat (BPE)")
 
 st.markdown(
     """
-Modelo **carácter a carácter** entrenado desde cero sobre `oscar_corpus.txt`  
-y luego *instruction-tuned* con un conjunto mínimo de pares (instrucción → respuesta).
+Modelo **token-level (BPE)** entrenado desde cero y luego **instruction-tuned**.
 
-⚠️ **Este modelo es muy pequeño y educativo**, no esperes respuestas tipo ChatGPT.
+- Primero intentamos un **FAQ fallback** (respuesta perfecta y determinística).
+- Si no hay match, usamos el **LLM** (tu checkpoint instruccional).
 """
 )
 
-st.markdown("---")
+# ---------------------------------------------------------------------
+# Sidebar: settings
+# ---------------------------------------------------------------------
+st.sidebar.header("⚙️ Configuración")
 
+meta_path = st.sidebar.text_input("meta.json", value=DEFAULT_META)
+tokenizer_path = st.sidebar.text_input("tokenizer.json", value=DEFAULT_TOK)
+ckpt_path = st.sidebar.text_input("checkpoint (.pt)", value=DEFAULT_CKPT)
+device = st.sidebar.selectbox("device", options=["mps", "cpu"], index=0 if DEFAULT_DEVICE == "mps" else 1)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Decoding")
+
+max_new_tokens = st.sidebar.slider("max_new_tokens", 10, 200, 60, 5)
+min_new_tokens = st.sidebar.slider("min_new_tokens", 1, 40, 2, 1)
+
+stop_at_period = st.sidebar.checkbox("stop_at_period (.)", value=True)
+period_id = st.sidebar.number_input("period_id", value=19, step=1)
+
+top_k = st.sidebar.slider("top_k (0 = greedy)", 0, 100, 0, 1)
+temperature = st.sidebar.slider("temperature (solo si top_k>0)", 0.0, 1.5, 1.0, 0.05)
+
+repetition_penalty = st.sidebar.slider("repetition_penalty", 1.0, 2.0, 1.0, 0.05)
+no_repeat_ngram = st.sidebar.slider("no_repeat_ngram", 0, 6, 0, 1)
+
+st.sidebar.markdown("---")
+use_faq = st.sidebar.checkbox("Usar FAQ fallback", value=True)
+
+if st.sidebar.button("🔁 Clear cache (recargar modelo)"):
+    clear_cache()
+    st.sidebar.success("Cache limpiado. La próxima respuesta recarga assets.")
+
+# ---------------------------------------------------------------------
+# Main: test questions
+# ---------------------------------------------------------------------
 st.markdown("### Pregunta de prueba")
 
 opciones = [
-    "Los perros son caninos?",
-    "Los gatos son felinos?",
-    "Cuál es la capital de Costa Rica?",
+    "¿Cuál es la capital de Costa Rica?",
+    "¿Cuál es la capital de Francia?",
+    "Los perros pertenecen a qué familia",
+    "¿Cuál es el 5 planeta del sistema solar?",
+    "¿Cuál es la capital de Argentina?",
+    # ejemplos “privados” (debe decir No tengo…)
+    "¿Cuál es el nombre de mis 4 perros?",
+    "¿Qué edad tiene mi hermano gemelo?",
 ]
 
-pregunta_base = st.radio(
-    "Elige una de las preguntas de test:",
-    opciones,
-    index=0,
-)
+pregunta_base = st.radio("Elige una pregunta:", opciones, index=0)
 
 prompt = st.text_area(
-    "Puedes ajustar la pregunta si quieres:",
+    "Puedes editar la pregunta:",
     value=pregunta_base,
-    height=100,
+    height=90,
 )
 
+# ---------------------------------------------------------------------
+# Generate
+# ---------------------------------------------------------------------
 if st.button("Generar respuesta"):
     if not prompt.strip():
-        st.warning("Por favor escribe una instrucción o pregunta.")
+        st.warning("Por favor escribe una pregunta.")
     else:
-        with st.spinner("Generando respuesta..."):
-            # 1) Intentar primero el fallback perfecto (FAQ)
-            faq_answer = faq_match(prompt)
-
-            if faq_answer is not None:
-                # Respuesta perfecta, sin usar el modelo
-                answer_text = faq_answer
-                full_text = f"(fallback) {faq_answer}"
-                st.success("✔ Respuesta obtenida vía fallback (respuesta perfecta)")
+        with st.spinner("Generando..."):
+            # 1) FAQ fallback
+            if use_faq:
+                fa = faq_match(prompt)
             else:
-                # 2) Si no coincide, usamos el modelo tiny
-                bundle = get_model_bundle()
+                fa = None
 
-                answer_text, full_text = generate_answer(
-                    bundle=bundle,
-                    prompt=prompt,
+            if fa is not None:
+                st.success("✔ Respuesta via FAQ fallback (determinística)")
+                answer_text = fa
+                debug_info = "(FAQ)"
+            else:
+                # 2) LLM
+                answer_text = answer(
+                    prompt,
+                    meta_path=meta_path,
+                    ckpt_path=ckpt_path,
+                    tokenizer_path=tokenizer_path,
+                    device=device,
                     max_new_tokens=max_new_tokens,
-                    temperature=temperature,
+                    min_new_tokens=min_new_tokens,
+                    stop_at_period=1 if stop_at_period else 0,
+                    period_id=int(period_id),
+                    top_k=int(top_k),
+                    temperature=float(temperature),
+                    repetition_penalty=float(repetition_penalty),
+                    no_repeat_ngram=int(no_repeat_ngram),
                 )
+                debug_info = "(LLM)"
 
-        st.markdown("### 🟢 Respuesta procesada (solo después de `<resp>`)")
+        st.markdown("### 🟢 Respuesta")
         st.write(answer_text)
 
-        st.markdown("### 📜 Texto completo generado")
-        st.code(repr(full_text), language="python")
-
-        st.markdown("---")
-        st.markdown(
-            "_Recuerda: este es un modelo tiny para fines educativos; "
-            "las respuestas pueden ser incoherentes._"
-        )
+        st.caption(f"{debug_info} | device={device} | top_k={top_k} | max_new_tokens={max_new_tokens}")
 else:
     st.info("Elige una pregunta y pulsa **Generar respuesta**.")
