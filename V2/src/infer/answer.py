@@ -23,6 +23,7 @@ from src.cli.generate_tokens import (
     generate,
 )
 
+
 # -----------------------------------------------------------------------------
 # Assets (cache)
 # -----------------------------------------------------------------------------
@@ -126,35 +127,40 @@ _PRIVATE_PATTERNS = [
     r"\bmis\s+\d+\b",
 ]
 
+
 def is_private_question(text: str) -> bool:
     t = text.lower()
     return any(re.search(pat, t) for pat in _PRIVATE_PATTERNS)
 
-# Mensajes de rechazo (humanos y con intención clara)
-_REFUSE_PRIVATE = "No tengo información personal tuya en mi entrenamiento, así que no puedo responder eso."
-_REFUSE_UNKNOWN = "No tengo suficiente información en mi entrenamiento para responder eso con precisión."
 
-# Para que el unknown_guard reconozca “ya rechacé”
-_REFUSE_MARKERS = ["no tengo información", "no tengo suficiente información", "no puedo responder"]
+# Mensajes de rechazo (humanos y consistentes)
+_REFUSE_PRIVATE = "No tengo información personal tuya en mi entrenamiento, así que no puedo responder eso."
+_REFUSE_UNKNOWN = "No tengo suficiente base en mi entrenamiento para responder eso con precisión."
+
+# Marcadores para detectar que “ya es rechazo”
+_REFUSE_MARKERS = [
+    "no tengo información",
+    "no tengo suficiente base",
+    "no puedo responder",
+]
 
 
 # -----------------------------------------------------------------------------
 # Unknown guard (anti-derrail en preguntas sin FACT)
 # -----------------------------------------------------------------------------
-# Palabras “ancla” típicas de tu instruction-tuning/KB (cuando el modelo se descarrila)
 _ANCHOR_WORDS = [
     "gato", "gatos", "felino", "felinos", "félido", "félidos",
     "perro", "perros", "canino", "caninos", "cánido", "cánidos",
     "capital", "costa rica", "francia",
 ]
 
-# Temas “generales” que el modelo tiny NO domina y donde suele descarrilar
 _TOPIC_HINTS = [
     "fotosíntesis", "relatividad", "cuántica", "quantica",
     "sistema solar", "planeta", "luna",
     "machine learning", "aprendizaje automático", "llm",
     "física", "fisica",
 ]
+
 
 def _unknown_guard(question: str, answer: str) -> bool:
     q = question.lower()
@@ -178,15 +184,18 @@ _JUNK_PATTERNS = [
     r"\bcánid", r"\bfélid",
 ]
 
+
 def _fact_key(fact: str) -> str:
     m = re.search(r"\bes\s+(.+?)\.\s*$", fact.strip(), flags=re.IGNORECASE)
     if m:
         return m.group(1).strip()
     return fact.strip().rstrip(".").split()[-1].strip()
 
+
 def _looks_bad(answer: str) -> bool:
     a = answer.lower()
     return any(re.search(p, a) for p in _JUNK_PATTERNS)
+
 
 def _validate_against_fact(answer: str, fact: str) -> bool:
     key = _fact_key(fact)
@@ -239,6 +248,11 @@ def _generate_only(
     full = out_ids[0].tolist()
     gen_only = full[len(enc.ids):]
     return _clean_text(assets.tokenizer.decode(gen_only))
+
+
+def _contains_refuse_marker(text: str) -> bool:
+    t = text.lower()
+    return any(m in t for m in _REFUSE_MARKERS)
 
 
 # -----------------------------------------------------------------------------
@@ -406,7 +420,19 @@ def answer_with_meta(
     )
     took_ms = (time.perf_counter() - t0) * 1000.0
 
-    # 4B) Unknown guard SOLO aquí
+    # 4A) Si el modelo devolvió “No tengo...” por sí solo, marcamos razón (UI)
+    if _contains_refuse_marker(ans):
+        return ans, {
+            "used_private_guard": False,
+            "used_fact": False,
+            "fact": "",
+            "fact_validation_fallback": False,
+            "unknown_guard_triggered": False,
+            "refuse_reason": "unknown_no_knowledge",
+            "took_ms": round(took_ms, 2),
+        }
+
+    # 4B) Unknown guard SOLO aquí (cuando se descarrila)
     if _unknown_guard(user_prompt, ans):
         return _REFUSE_UNKNOWN, {
             "used_private_guard": False,
