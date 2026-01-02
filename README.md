@@ -1033,12 +1033,13 @@ A richer instruction set enables the model to respond in a more natural, general
 1. Better optimization techniques
 
 Future versions will incorporate:
-	•	cosine learning rate scheduling,
-	•	warmup steps,
-	•	gradient clipping,
-	•	improved weight initialization,
-	•	mixed-precision training,
-	•	checkpoint averaging.
+
+•	cosine learning rate scheduling,
+•	warmup steps,
+•	gradient clipping,
+•	improved weight initialization,
+•	mixed-precision training,
+•	checkpoint averaging.
 
 These refinements stabilize training and help the model converge to stronger minima.
 
@@ -1048,8 +1049,10 @@ These refinements stabilize training and help the model converge to stronger min
 
 The current model uses a short context (128 tokens).
 Version 2 will explore:
-	•	256, 512, and possibly 1024-token contexts,
-	•	ALiBi or RoPE for scalable positional reasoning.
+
+•	256, 512, and possibly 1024-token contexts,
+	
+•	ALiBi or RoPE for scalable positional reasoning.
 
 This massively improves tasks requiring multi-sentence coherence.
 
@@ -1058,6 +1061,7 @@ This massively improves tasks requiring multi-sentence coherence.
 3. More robust validation and evaluation
 
 Rather than relying on a few fixed test questions, we will introduce:
+
 	•	automated evaluation suites,
 	•	perplexity tracking,
 	•	held-out datasets,
@@ -1070,6 +1074,7 @@ This transforms the project from “does it run?” to “how well does it perfo
 1. Improve the Streamlit UI
 
 Planned additions:
+
 	•	chat-style conversation history,
 	•	adjustable system prompts,
 	•	token usage visualization,
@@ -1081,6 +1086,7 @@ These features bring the interface closer to a real LLM playground.
 2. API layer for deployment
 
 To support external integrations, a FastAPI inference service is planned:
+
 	•	clean REST endpoints,
 	•	lightweight load balancing,
 	•	Docker-ready deployment,
@@ -1091,6 +1097,7 @@ This bridges the project into more production-oriented territory.
 3. Modularity for experimenting with different models
 
 The repository will support “plug-and-play” models:
+
 	•	character-level GPT (current V1)
 	•	word-level GPT (V2)
 	•	distilled versions
@@ -1105,11 +1112,16 @@ This modularity is key for ongoing research and experimentation.
 The aim of these improvements is not just incremental refinement—it is to transform the project from a proof of concept into a mini research playground for LLM construction.
 
 Version 2 will represent:
-	•	a more modern architecture,
-	•	a more realistic dataset pipeline,
-	•	a more expressive tokenizer,
-	•	a more capable model,
-	•	and a significantly more powerful instruction-tuned system.
+
+•	a more modern architecture,
+
+•	a more realistic dataset pipeline,
+
+•	a more expressive tokenizer,
+
+•	a more capable model,
+
+•	and a significantly more powerful instruction-tuned system.
 
 And because every component remains fully transparent and hand-built, the educational value increases rather than decreases.
 
