@@ -1,27 +1,27 @@
-# V1/Dockerfile
-
 FROM python:3.11-slim
 
-# Evitar prompts interactivos
-ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-# Directorio de trabajo dentro del contenedor
 WORKDIR /app
 
-# Copiar SOLO el contenido de V1 dentro del contenedor
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . /app
 
-# Paquetes de sistema mínimos
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+ENV STREAMLIT_SERVER_PORT=8502
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 
-# Instalar dependencias de Python
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+ENV LLM_DEVICE=cpu
+ENV LLM_META=models/tokenized/oscar_bpe_v4/meta.json
+ENV LLM_TOKENIZER=models/tokenizers/oscar_bpe_v4/tokenizer.json
+ENV LLM_CKPT=models/checkpoints/instr_mini_run_masked_eos_CLOSE_v4/ckpt_instr_debug.pt
 
-# Streamlit escucha en 8501
-EXPOSE 8501
+EXPOSE 8502
 
-# Comando por defecto: lanzar la app de Streamlit
-CMD ["streamlit", "run", "app/streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "app/streamlit_app.py", "--server.port=8502", "--server.address=0.0.0.0"]
