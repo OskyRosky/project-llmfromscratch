@@ -1,3 +1,10 @@
+import sys
+from pathlib import Path
+
+# Add project root (V2/) to sys.path
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 from src.infer.answer import answer
 
 META="models/tokenized/oscar_bpe_v4/meta.json"
