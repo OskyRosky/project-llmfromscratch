@@ -139,8 +139,10 @@ _REFUSE_UNKNOWN = "No tengo suficiente base en mi entrenamiento para responder e
 
 # Marcadores para detectar que “ya es rechazo”
 _REFUSE_MARKERS = [
-    "no tengo información",
-    "no tengo suficiente base",
+    "no tengo información",              # cubre private
+    "no tengo esa información",          # cubre el texto típico del modelo
+    "en mi entrenamiento actual",        # refuerzo del mismo caso
+    "no tengo suficiente base",          # tu unknown unificado
     "no puedo responder",
 ]
 
@@ -420,17 +422,19 @@ def answer_with_meta(
     )
     took_ms = (time.perf_counter() - t0) * 1000.0
 
-    # 4A) Si el modelo devolvió “No tengo...” por sí solo, marcamos razón (UI)
+    # 4A) Si el modelo devolvió un “No tengo...” por sí solo:
+    # - unificamos el texto a _REFUSE_UNKNOWN
+    # - seteamos refuse_reason para UI
     if _contains_refuse_marker(ans):
-        return ans, {
-            "used_private_guard": False,
-            "used_fact": False,
-            "fact": "",
-            "fact_validation_fallback": False,
-            "unknown_guard_triggered": False,
-            "refuse_reason": "unknown_no_knowledge",
-            "took_ms": round(took_ms, 2),
-        }
+    return _REFUSE_UNKNOWN, {
+        "used_private_guard": False,
+        "used_fact": False,
+        "fact": "",
+        "fact_validation_fallback": False,
+        "unknown_guard_triggered": False,
+        "refuse_reason": "unknown_no_knowledge",
+        "took_ms": round(took_ms, 2),
+    }
 
     # 4B) Unknown guard SOLO aquí (cuando se descarrila)
     if _unknown_guard(user_prompt, ans):
