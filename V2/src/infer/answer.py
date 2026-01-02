@@ -23,7 +23,6 @@ from src.cli.generate_tokens import (
     generate,
 )
 
-
 # -----------------------------------------------------------------------------
 # Assets (cache)
 # -----------------------------------------------------------------------------
@@ -116,7 +115,7 @@ def _clean_text(s: str) -> str:
 
 
 # -----------------------------------------------------------------------------
-# Guards
+# Guards: PRIVATE
 # -----------------------------------------------------------------------------
 _PRIVATE_PATTERNS = [
     r"\bmi\b", r"\bmis\b", r"\bmío\b", r"\bmía\b",
@@ -131,38 +130,46 @@ def is_private_question(text: str) -> bool:
     t = text.lower()
     return any(re.search(pat, t) for pat in _PRIVATE_PATTERNS)
 
-_REFUSE = "No tengo esa información en mi entrenamiento actual."
+# Mensajes de rechazo (humanos y con intención clara)
+_REFUSE_PRIVATE = "No tengo información personal tuya en mi entrenamiento, así que no puedo responder eso."
+_REFUSE_UNKNOWN = "No tengo suficiente información en mi entrenamiento para responder eso con precisión."
+
+# Para que el unknown_guard reconozca “ya rechacé”
+_REFUSE_MARKERS = ["no tengo información", "no tengo suficiente información", "no puedo responder"]
 
 
 # -----------------------------------------------------------------------------
 # Unknown guard (anti-derrail en preguntas sin FACT)
 # -----------------------------------------------------------------------------
+# Palabras “ancla” típicas de tu instruction-tuning/KB (cuando el modelo se descarrila)
 _ANCHOR_WORDS = [
     "gato", "gatos", "felino", "felinos", "félido", "félidos",
     "perro", "perros", "canino", "caninos", "cánido", "cánidos",
     "capital", "costa rica", "francia",
 ]
 
+# Temas “generales” que el modelo tiny NO domina y donde suele descarrilar
 _TOPIC_HINTS = [
     "fotosíntesis", "relatividad", "cuántica", "quantica",
     "sistema solar", "planeta", "luna",
     "machine learning", "aprendizaje automático", "llm",
-    "población", "distancia", "gdp",
+    "física", "fisica",
 ]
 
 def _unknown_guard(question: str, answer: str) -> bool:
     """
-    True => la salida parece fuera de tema (derailed),
-    así que mejor devolvemos _REFUSE.
+    True => la salida parece fuera de tema (derailed) en preguntas sin FACT.
+    En ese caso, devolvemos _REFUSE_UNKNOWN.
     """
     q = question.lower()
     a = answer.lower()
 
-    if "no tengo esa información" in a:
+    # Si ya es rechazo (cualquier variante), no tocar
+    if any(m in a for m in _REFUSE_MARKERS):
         return False
 
     has_topic = any(t in q for t in _TOPIC_HINTS)
-    has_anchor = any(w in a for w in _ANCHOR_WORDS)
+    anchor_hits = sum(1 for w in _ANCHOR_WORDS if w in a)
 
     return bool(has_topic and has_anchor)
 
@@ -313,12 +320,13 @@ def answer_with_meta(
 
     # 1) Private guard
     if is_private_question(user_prompt):
-        return _REFUSE, {
+        return _REFUSE_PRIVATE, {
             "used_private_guard": True,
             "used_fact": False,
             "fact": "",
             "fact_validation_fallback": False,
             "unknown_guard_triggered": False,
+            "refuse_reason": "private",
             "took_ms": 0.0,
         }
 
@@ -339,6 +347,7 @@ def answer_with_meta(
 
     t0 = time.perf_counter()
 
+    # 3A) Con FACT: anclado y seguro
     if used_fact:
         guided_prompt = (
             "Responde con UNA sola oración, breve y correcta. "
@@ -372,6 +381,7 @@ def answer_with_meta(
                 "fact": fact,
                 "fact_validation_fallback": True,
                 "unknown_guard_triggered": False,
+                "refuse_reason": "",
                 "took_ms": round(took_ms, 2),
             }
 
@@ -381,6 +391,7 @@ def answer_with_meta(
             "fact": fact,
             "fact_validation_fallback": False,
             "unknown_guard_triggered": False,
+            "refuse_reason": "",
             "took_ms": round(took_ms, 2),
         }
 
@@ -399,13 +410,15 @@ def answer_with_meta(
     )
     took_ms = (time.perf_counter() - t0) * 1000.0
 
+    # 4B) Unknown guard SOLO aquí
     if _unknown_guard(user_prompt, ans):
-        return _REFUSE, {
+        return _REFUSE_UNKNOWN, {
             "used_private_guard": False,
             "used_fact": False,
             "fact": "",
             "fact_validation_fallback": False,
             "unknown_guard_triggered": True,
+            "refuse_reason": "unknown_derail",
             "took_ms": round(took_ms, 2),
         }
 
@@ -415,5 +428,6 @@ def answer_with_meta(
         "fact": "",
         "fact_validation_fallback": False,
         "unknown_guard_triggered": False,
+        "refuse_reason": "",
         "took_ms": round(took_ms, 2),
     }
